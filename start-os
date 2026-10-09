@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+# Create assets
+python3 scripts/helpers/images/png2bin_fontsheet.py sdk/os/assets/src/font_black_sheet.png sdk/os/assets/font_black_sheet.raw
+python3 scripts/helpers/images/png2bin_fontsheet.py sdk/os/assets/src/font_white_sheet.png sdk/os/assets/font_white_sheet.raw
+python3 scripts/helpers/images/png2bin.py sdk/os/assets/src/icon_disk.png sdk/os/assets/icon_disk.raw
+python3 scripts/helpers/images/png2bin.py sdk/os/assets/src/icon_file.png sdk/os/assets/icon_file.raw
+python3 scripts/helpers/images/png2bin.py sdk/os/assets/src/icon_folder.png sdk/os/assets/icon_folder.raw
+python3 scripts/helpers/images/png2bin.py sdk/os/assets/src/icon_gear.png sdk/os/assets/icon_gear.raw
+python3 scripts/helpers/images/png2bin.py sdk/os/assets/src/wallpaper.png sdk/os/assets/wallpaper.raw
+
+# Compile
+python3 sdk/qasm/qasm.py sdk/os/quartz_os.quartz dist/quartz_os.bin
+
+# Run
+./build/quartz dist/quartz_os.bin --ram 8388608 --disk disk.img --cursor 0

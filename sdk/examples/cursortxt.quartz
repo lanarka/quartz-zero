@@ -1,0 +1,20 @@
+// A B G R
+loop:
+
+	movi u16 #0 1
+	movi u16 #1 2
+	movi u16 #2 65
+	movi u32 #3 0xFFFFFFFF
+	movi u32 #4 0xFF000000
+	xtchar #0 #1 #2 #3 #4
+
+	xitmouse #0 #1 #9
+
+	movi u16 #2 9608
+	movi u32 #3 0x770000FF
+	movi u32 #4 0x770000FF
+	xtchar #0 #1 #2 #3 #4
+	
+	xvsync 0
+	xtclear
+	jmp loop

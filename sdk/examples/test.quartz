@@ -1,0 +1,502 @@
+// ============================================================================
+// test.src - a comprehensive test of all VM instructions
+//
+// Each test computes a value and compares it (cmp/cmpi) with the expected
+// result. If it doesn't match, it jumps to "fail" and stores the number of
+// the failed test in R15.
+// At the end: prints 0 (ALL TESTS PASSED), or the number of the first failed test.
+//
+// R15 is reserved as the "status" register (number of the currently running
+// test / fail marker).
+// ============================================================================
+
+	nop                          // test 0: NOP - just advances the PC, checks nothing
+
+// --- Section A: MOVI / PRINT for all 10 types ------------------------
+	movi i8   #0 -100
+	print i8  #0                 // expected: -100
+	cmpi i8   #0 -100
+	jz t1
+	movi i32 #15 1
+	jmp fail
+t1:
+	movi i16  #0 -30000
+	print i16 #0                 // expected: -30000
+	cmpi i16  #0 -30000
+	jz t2
+	movi i32 #15 2
+	jmp fail
+t2:
+	movi i32  #0 -2000000000
+	print i32 #0                 // expected: -2000000000
+	cmpi i32  #0 -2000000000
+	jz t3
+	movi i32 #15 3
+	jmp fail
+t3:
+	movi u8   #0 200
+	print u8  #0                 // expected: 200
+	cmpi u8   #0 200
+	jz t4
+	movi i32 #15 4
+	jmp fail
+t4:
+	movi u16  #0 60000
+	print u16 #0                 // expected: 60000
+	cmpi u16  #0 60000
+	jz t5
+	movi i32 #15 5
+	jmp fail
+t5:
+	movi u32  #0 4000000000
+	print u32 #0                 // expected: 4000000000
+	cmpi u32  #0 4000000000
+	jz t6
+	movi i32 #15 6
+	jmp fail
+t6:
+	movi i64  #0 -9000000000000000000
+	print i64 #0                 // expected: -9000000000000000000
+	cmpi i64  #0 -9000000000000000000
+	jz t7
+	movi i32 #15 7
+	jmp fail
+t7:
+	movi u64  #0 18000000000000000000
+	print u64 #0                 // expected: 18000000000000000000
+	cmpi u64  #0 18000000000000000000
+	jz t8
+	movi i32 #15 8
+	jmp fail
+t8:
+	movi f32  #0 123.5
+	print f32 #0                 // expected: 123.5
+	cmpi f32  #0 123.5
+	jz t9
+	movi i32 #15 9
+	jmp fail
+t9:
+	movi f64  #0 100.25
+	print f64 #0                 // expected: 100.25
+	cmpi f64  #0 100.25
+	jz t10
+	movi i32 #15 10
+	jmp fail
+t10:
+
+// --- Section B: MOV (raw bit copy) --------------------------------------
+	movi i32 #0 777
+	mov  #1 #0
+	cmpi i32 #1 777
+	jz t11
+	movi i32 #15 11
+	jmp fail
+t11:
+
+// --- Section C: ADD ---------------------------------------------------------
+	movi i32 #0 5
+	movi i32 #1 3
+	add  i32 #0 #1
+	cmpi i32 #0 8
+	jz t12
+	movi i32 #15 12
+	jmp fail
+t12:
+	movi u8 #0 250
+	movi u8 #1 10
+	add  u8 #0 #1                // 250+10 = 260 -> wraps to u8 = 4
+	cmpi u8 #0 4
+	jz t13
+	movi i32 #15 13
+	jmp fail
+t13:
+	movi f32 #0 3.5
+	movi f32 #1 1.25
+	add  f32 #0 #1
+	cmpi f32 #0 4.75
+	jz t14
+	movi i32 #15 14
+	jmp fail
+t14:
+	movi i64 #0 5000000000
+	movi i64 #1 3000000000
+	add  i64 #0 #1                // exceeds 32-bit range - verifies real 64-bit width
+	cmpi i64 #0 8000000000
+	jz t15
+	movi i32 #15 15
+	jmp fail
+t15:
+
+// --- Section D: SUB ----------------------------------------------------------
+	movi i32 #0 10
+	movi i32 #1 3
+	sub  i32 #0 #1
+	cmpi i32 #0 7
+	jz t16
+	movi i32 #15 16
+	jmp fail
+t16:
+	movi u16 #0 0
+	subi u16 #0 1                 // 0-1 -> wraps to u16 = 65535
+	cmpi u16 #0 65535
+	jz t17
+	movi i32 #15 17
+	jmp fail
+t17:
+	movi f64 #0 5.75
+	movi f64 #1 2.25
+	sub  f64 #0 #1
+	cmpi f64 #0 3.5
+	jz t18
+	movi i32 #15 18
+	jmp fail
+t18:
+
+// --- Section E: MUL ------------------------------------------------------------
+	movi i32 #0 6
+	movi i32 #1 7
+	mul  i32 #0 #1
+	cmpi i32 #0 42
+	jz t19
+	movi i32 #15 19
+	jmp fail
+t19:
+	movi u8 #0 100
+	movi u8 #1 3
+	mul  u8 #0 #1                 // 100*3 = 300 -> wraps to u8 = 44
+	cmpi u8 #0 44
+	jz t20
+	movi i32 #15 20
+	jmp fail
+t20:
+	movi f32 #0 2.5
+	movi f32 #1 4.0
+	mul  f32 #0 #1
+	cmpi f32 #0 10.0
+	jz t21
+	movi i32 #15 21
+	jmp fail
+t21:
+
+// --- Section F: DIV --------------------------------------------------------------
+	movi u32 #0 10
+	movi u32 #1 3
+	div  u32 #0 #1                 // unsigned: 10/3 = 3
+	cmpi u32 #0 3
+	jz t22
+	movi i32 #15 22
+	jmp fail
+t22:
+	movi i32 #0 -10
+	movi i32 #1 3
+	div  i32 #0 #1                 // signed trunc: -10/3 = -3
+	cmpi i32 #0 -3
+	jz t23
+	movi i32 #15 23
+	jmp fail
+t23:
+	movi f64 #0 10.0
+	movi f64 #1 4.0
+	div  f64 #0 #1
+	cmpi f64 #0 2.5
+	jz t24
+	movi i32 #15 24
+	jmp fail
+t24:
+
+// --- Section G: MOD --------------------------------------------------------------
+	movi u32 #0 10
+	movi u32 #1 3
+	mod  u32 #0 #1                 // 10 % 3 = 1
+	cmpi u32 #0 1
+	jz t25
+	movi i32 #15 25
+	jmp fail
+t25:
+	movi i32 #0 -10
+	movi i32 #1 3
+	mod  i32 #0 #1                 // signed trunc: -10 % 3 = -1
+	cmpi i32 #0 -1
+	jz t26
+	movi i32 #15 26
+	jmp fail
+t26:
+	movi f64 #0 7.5
+	movi f64 #1 2.0
+	mod  f64 #0 #1                 // fmod(7.5, 2.0) = 1.5
+	cmpi f64 #0 1.5
+	jz t27
+	movi i32 #15 27
+	jmp fail
+t27:
+
+// --- Section H: AND / OR / XOR ---------------------------------------------------
+	movi u8 #0 12                  // 0b00001100
+	movi u8 #1 10                  // 0b00001010
+	and  u8 #0 #1                  // = 0b00001000 = 8
+	cmpi u8 #0 8
+	jz t28
+	movi i32 #15 28
+	jmp fail
+t28:
+	movi u8 #0 12
+	movi u8 #1 10
+	or   u8 #0 #1                  // = 0b00001110 = 14
+	cmpi u8 #0 14
+	jz t29
+	movi i32 #15 29
+	jmp fail
+t29:
+	movi u8 #0 12
+	movi u8 #1 10
+	xor  u8 #0 #1                  // = 0b00000110 = 6
+	cmpi u8 #0 6
+	jz t30
+	movi i32 #15 30
+	jmp fail
+t30:
+
+// --- Section I: SHL / SHR ----------------------------------------------------------
+	movi u8 #0 1
+	movi u8 #1 3
+	shl  u8 #0 #1                  // 1<<3 = 8
+	cmpi u8 #0 8
+	jz t31
+	movi i32 #15 31
+	jmp fail
+t31:
+	movi u8 #0 128
+	movi u8 #1 3
+	shr  u8 #0 #1                  // logical shift: 128>>3 = 16
+	cmpi u8 #0 16
+	jz t32
+	movi i32 #15 32
+	jmp fail
+t32:
+	movi i8 #0 -8
+	movi i8 #1 1
+	shr  i8 #0 #1                  // arithmetic shift (preserves sign): -8>>1 = -4
+	cmpi i8 #0 -4
+	jz t33
+	movi i32 #15 33
+	jmp fail
+t33:
+
+// --- Section J: ADDI / SUBI --------------------------------------------------------
+	movi i32 #0 5
+	addi i32 #0 10
+	cmpi i32 #0 15
+	jz t34
+	movi i32 #15 34
+	jmp fail
+t34:
+	movi u16 #0 5
+	subi u16 #0 10                  // 5-10 -> wraps to u16 = 65531
+	cmpi u16 #0 65531
+	jz t35
+	movi i32 #15 35
+	jmp fail
+t35:
+	movi u64 #0 0
+	subi u64 #0 1                   // 0-1 -> wraps to u64 = max u64
+	cmpi u64 #0 18446744073709551615
+	jz t36
+	movi i32 #15 36
+	jmp fail
+t36:
+
+// --- Section K: INC / DEC -----------------------------------------------------------
+	movi i32 #0 41
+	inc  i32 #0
+	cmpi i32 #0 42
+	jz t37
+	movi i32 #15 37
+	jmp fail
+t37:
+	movi f32 #0 5.5
+	dec  f32 #0
+	cmpi f32 #0 4.5
+	jz t38
+	movi i32 #15 38
+	jmp fail
+t38:
+
+// --- Section L: NOT ------------------------------------------------------------------
+	movi u8 #0 15                    // 0b00001111
+	not  u8 #0                        // ~15 truncated to u8 = 0b11110000 = 240
+	cmpi u8 #0 240
+	jz t39
+	movi i32 #15 39
+	jmp fail
+t39:
+
+// --- Section M: conditional jumps (JZ/JNZ/JG/JL/JGE/JLE), each with a true and a false branch ---
+	movi i32 #0 5
+	cmpi i32 #0 5
+	jz t40a
+	movi i32 #15 40
+	jmp fail
+t40a:                                // JZ - true branch (5==5) OK
+	movi i32 #0 5
+	cmpi i32 #0 6
+	jz t40b_bad
+	jmp t40b
+t40b_bad:
+	movi i32 #15 41
+	jmp fail
+t40b:                                // JZ - false branch (5!=6, must not have jumped) OK
+	movi i32 #0 5
+	cmpi i32 #0 6
+	jnz t41a
+	movi i32 #15 42
+	jmp fail
+t41a:                                // JNZ - true branch (5!=6) OK
+	movi i32 #0 5
+	cmpi i32 #0 5
+	jnz t41b_bad
+	jmp t41b
+t41b_bad:
+	movi i32 #15 43
+	jmp fail
+t41b:                                // JNZ - false branch (5==5, must not have jumped) OK
+	movi i32 #0 10
+	cmpi i32 #0 5
+	jg t42a
+	movi i32 #15 44
+	jmp fail
+t42a:                                // JG - true branch (10>5) OK
+	movi i32 #0 5
+	cmpi i32 #0 5
+	jg t42b_bad
+	jmp t42b
+t42b_bad:
+	movi i32 #15 45
+	jmp fail
+t42b:                                // JG - false branch (5 is not >5, must not have jumped) OK
+	movi i32 #0 3
+	cmpi i32 #0 8
+	jl t43a
+	movi i32 #15 46
+	jmp fail
+t43a:                                // JL - true branch (3<8) OK
+	movi i32 #0 8
+	cmpi i32 #0 8
+	jl t43b_bad
+	jmp t43b
+t43b_bad:
+	movi i32 #15 47
+	jmp fail
+t43b:                                // JL - false branch (8 is not <8, must not have jumped) OK
+	movi i32 #0 5
+	cmpi i32 #0 5
+	jge t44a
+	movi i32 #15 48
+	jmp fail
+t44a:                                // JGE - true branch (5>=5, edge case) OK
+	movi i32 #0 3
+	cmpi i32 #0 8
+	jge t44b_bad
+	jmp t44b
+t44b_bad:
+	movi i32 #15 49
+	jmp fail
+t44b:                                // JGE - false branch (3 is not >=8, must not have jumped) OK
+	movi i32 #0 5
+	cmpi i32 #0 5
+	jle t45a
+	movi i32 #15 50
+	jmp fail
+t45a:                                // JLE - true branch (5<=5, edge case) OK
+	movi i32 #0 9
+	cmpi i32 #0 4
+	jle t45b_bad
+	jmp t45b
+t45b_bad:
+	movi i32 #15 51
+	jmp fail
+t45b:                                // JLE - false branch (9 is not <=4, must not have jumped) OK
+
+// --- Section N: CALL / RET (the subroutine is at the end of the file) --------------------------
+	movi i32 #0 6
+	call square
+	cmpi i32 #0 36                     // square(6) = 36
+	jz t46
+	movi i32 #15 52
+	jmp fail
+t46:
+
+// --- Section O: PUSH / POP (LIFO order) --------------------------------------------
+	movi i32 #0 1
+	movi i32 #1 2
+	movi i32 #2 3
+	push #0
+	push #1
+	push #2
+	pop  #3                             // the last pushed value (3) comes out first
+	pop  #4
+	pop  #5
+	cmpi i32 #3 3
+	jz t47
+	movi i32 #15 53
+	jmp fail
+t47:
+	cmpi i32 #4 2
+	jz t48
+	movi i32 #15 54
+	jmp fail
+t48:
+	cmpi i32 #5 1
+	jz t49
+	movi i32 #15 55
+	jmp fail
+t49:
+
+// --- Section P: LOAD / STORE (direct address) and LOADR / STORER (via register) --------
+	movi u8 #0 222
+	store u8 100 #0                    // store to direct RAM address 100
+	movi u8 #1 0
+	load  u8 #1 100
+	cmpi  u8 #1 222
+	jz t50
+	movi i32 #15 56
+	jmp fail
+t50:
+	movi i64 #0 -123456789012345
+	store i64 200 #0                   // 8-byte access at a direct address
+	movi i64 #1 0
+	load  i64 #1 200
+	cmpi  i64 #1 -123456789012345
+	jz t51
+	movi i32 #15 57
+	jmp fail
+t51:
+	movi u32 #0 4000000000
+	movi i32 #6 300                    // #6 = address (register-indirect)
+	storer u32 #6 #0
+	movi u32 #1 0
+	loadr  u32 #1 #6
+	cmpi   u32 #1 4000000000
+	jz t52
+	movi i32 #15 58
+	jmp fail
+t52:
+
+// --- Section Q: RND 
+	rnd #0 100
+	print i32 #0                        // manual check: value in range 0..99
+
+// ============================================================================
+// RESULT
+// ============================================================================
+	movi i32 #15 0
+	print i32 #15                        // 0 = ALL TESTS PASSED
+	jmp end
+fail:
+	print i32 #15                        // number of the first failed test
+end:
+	halt
+
+// subroutine: raises #0 to the power of two (#0 = #0 * #0)
+square:
+	mul i32 #0 #0
+	ret

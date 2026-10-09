@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+# Compile programs
+python3 sdk/qasm/qasm.py sdk/examples/game.quartz dist/game.bin --raw
+python3 sdk/qasm/qasm.py sdk/examples/mandelbrot.quartz dist/mandelbrot.bin --raw
+python3 sdk/qasm/qasm.py sdk/examples/hello.quartz dist/hello.bin --raw
+
+# Create disk
+./build/qdisk disk.img format 256K
+
+# Create direcotry
+./build/qdisk disk.img mkdir examples
+
+# Add files
+./build/qdisk disk.img import dist/game.bin examples/game.bin
+./build/qdisk disk.img import dist/mandelbrot.bin examples/mandelbrot.bin
+./build/qdisk disk.img import dist/hello.bin examples/hello.bin
+
+echo "Hello World" > dist/hello.txt
+./build/qdisk disk.img import dist/hello.txt examples/hello.txt

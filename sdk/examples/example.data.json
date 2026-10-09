@@ -1,0 +1,8 @@
+{
+	"start": "0x00",
+	"blobs": [
+		{"MyData-1": {"from_bytes": ["0x61", "0x62", "0x63"]}},
+		{"MyData-2": {"from_file": "filename.dat"}},
+		{"MyData-3": {"from_string": "Hello World"}}
+	]
+}

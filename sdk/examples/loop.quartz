@@ -1,0 +1,11 @@
+	movi i32 #0 5
+
+loop:
+	print i32 #0
+	cmpi i32 #0 0
+	jz done
+	dec i32 #0
+	jmp loop
+
+done:
+	halt

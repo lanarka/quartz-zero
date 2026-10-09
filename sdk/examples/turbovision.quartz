@@ -1,0 +1,958 @@
+// ============================================================================
+// turbovision.quartz - Text-mode demo in the style of Turbo Vision (1980s)
+//
+// Controls: mouse (left button).
+//   - click "File" / "Help" in the top menu bar to open its dropdown
+//   - File contains "Reboot" (cold-restarts the VM) and "Quit" (halts the VM)
+//   - Help contains "About" (about this program)
+//   - The Welcome dialog appears right at startup, close it with [ OK ]
+//
+// Everything is fully redrawn every frame (immediate-mode GUI) - the VM has
+// a budget of 200000 instructions/frame, and redrawing the whole 80x30 text
+// grid is cheap, so there's no need to bother with partial redraws.
+//
+// The mouse text cursor (see cursortxt.quartz) is drawn as the very last
+// layer: a semi-transparent (alpha 0x77) white block over whatever cell the
+// mouse is on - so there's no need to know what's underneath it, it's just
+// tinted.
+//
+// Memory map (RAM):
+//   0x0000  UI_STATE     (u32) 0=main screen, 1=Welcome dialog, 2=About dialog
+//   0x0004  MENU_ACTIVE  (u32) 0=closed, 1=File open, 2=Help open
+//   0x0008  MOUSE_COL    (u32)
+//   0x000C  MOUSE_ROW    (u32)
+//   0x0010  MOUSE_BTN    (u32) bit0 = left button
+//   0x0014  PREV_BTN     (u32) button state from the previous frame (edge-detect)
+//   0x0018  CLICK        (u32) 1 = a click just happened this frame (rising edge)
+//   0x0100.. strings (see tv_labels_en.quartz)
+// ============================================================================
+
+%runtime 255
+%entrypoint start
+
+start:
+	call init
+	jmp main_loop
+
+// ============================================================================
+// INIT
+// ============================================================================
+init:
+	beep
+	movi u32 #0 1
+	store u32 0x0000 #0        // ui_state = 1 (Welcome dialog at startup)
+	movi u32 #0 0
+	store u32 0x0004 #0        // menu_active = 0
+	store u32 0x0008 #0
+	store u32 0x000C #0
+	store u32 0x0010 #0
+	store u32 0x0014 #0
+	store u32 0x0018 #0
+	call fill_label_strings
+	ret
+
+fill_label_strings:
+%include "turbovision_labels.quartz"
+	ret
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+main_loop:
+	// prev_btn = btn (from the previous frame), then read the new mouse state
+	load u32 #0 0x0010
+	store u32 0x0014 #0
+
+	xitmouse #1 #2 #3
+	store u32 0x0008 #1
+	store u32 0x000C #2
+	store u32 0x0010 #3
+
+	// compute click (rising edge of the left button)
+	load u32 #0 0x0010
+	movi u32 #1 1
+	and  u32 #0 #1
+	load u32 #2 0x0014
+	and  u32 #2 #1
+	cmpi u32 #2 0
+	jnz ml_no_click
+	cmpi u32 #0 0
+	jz ml_no_click
+	movi u32 #4 1
+	store u32 0x0018 #4
+	jmp ml_click_done
+ml_no_click:
+	movi u32 #4 0
+	store u32 0x0018 #4
+ml_click_done:
+
+	load u32 #0 0x0018
+	cmpi u32 #0 0
+	jz ml_skip_click
+	call handle_click
+ml_skip_click:
+
+	call render_frame
+	xvsync 0
+	jmp main_loop
+
+// ============================================================================
+// CLICK HANDLING
+// ============================================================================
+handle_click:
+	load u32 #0 0x0000
+	cmpi u32 #0 1
+	jz hc_welcome
+	cmpi u32 #0 2
+	jz hc_about
+	jmp hc_main
+
+hc_welcome:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 36
+	movi u32 #3 16
+	movi u32 #4 8
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hc_done
+	movi u32 #0 0
+	store u32 0x0000 #0
+	jmp hc_done
+
+hc_about:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 36
+	movi u32 #3 17
+	movi u32 #4 8
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hc_done
+	movi u32 #0 0
+	store u32 0x0000 #0
+	jmp hc_done
+
+hc_main:
+	load u32 #6 0x0004
+	cmpi u32 #6 0
+	jz hc_closed
+	cmpi u32 #6 1
+	jz hc_file_open
+	jmp hc_help_open
+
+hc_closed:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 1
+	movi u32 #3 0
+	movi u32 #4 6
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hc_closed_help
+	movi u32 #0 1
+	store u32 0x0004 #0
+	jmp hc_done
+hc_closed_help:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 9
+	movi u32 #3 0
+	movi u32 #4 6
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hc_done
+	movi u32 #0 2
+	store u32 0x0004 #0
+	jmp hc_done
+
+hc_file_open:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 1
+	movi u32 #3 0
+	movi u32 #4 6
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hfo_help
+	movi u32 #0 0
+	store u32 0x0004 #0
+	jmp hc_done
+hfo_help:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 9
+	movi u32 #3 0
+	movi u32 #4 6
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hfo_reboot
+	movi u32 #0 2
+	store u32 0x0004 #0
+	jmp hc_done
+hfo_reboot:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 1
+	movi u32 #3 2
+	movi u32 #4 14
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hfo_quit
+	reset
+	jmp hc_done
+hfo_quit:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 1
+	movi u32 #3 3
+	movi u32 #4 14
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hfo_dismiss
+	halt
+hfo_dismiss:
+	movi u32 #0 0
+	store u32 0x0004 #0
+	jmp hc_done
+
+hc_help_open:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 9
+	movi u32 #3 0
+	movi u32 #4 6
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hho_file
+	movi u32 #0 0
+	store u32 0x0004 #0
+	jmp hc_done
+hho_file:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 1
+	movi u32 #3 0
+	movi u32 #4 6
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hho_about
+	movi u32 #0 1
+	store u32 0x0004 #0
+	jmp hc_done
+hho_about:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 9
+	movi u32 #3 2
+	movi u32 #4 14
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz hho_dismiss
+	movi u32 #0 0
+	store u32 0x0004 #0
+	movi u32 #0 2
+	store u32 0x0000 #0
+	jmp hc_done
+hho_dismiss:
+	movi u32 #0 0
+	store u32 0x0004 #0
+
+hc_done:
+	ret
+
+// ============================================================================
+// RENDERING - main layer order
+// ============================================================================
+render_frame:
+	call draw_desktop
+	call render_menubar
+
+	load u32 #0 0x0004
+	cmpi u32 #0 1
+	jz rf_file_menu
+	cmpi u32 #0 2
+	jz rf_help_menu
+	jmp rf_menu_done
+rf_file_menu:
+	call render_file_menu
+	jmp rf_menu_done
+rf_help_menu:
+	call render_help_menu
+rf_menu_done:
+
+	load u32 #0 0x0000
+	cmpi u32 #0 1
+	jz rf_welcome
+	cmpi u32 #0 2
+	jz rf_about
+	jmp rf_dialog_done
+rf_welcome:
+	call render_welcome_dialog
+	jmp rf_dialog_done
+rf_about:
+	call render_about_dialog
+rf_dialog_done:
+
+	call draw_cursor
+	ret
+
+draw_desktop:
+	movi u32 #0 0
+	movi u32 #1 1
+	movi u32 #2 80
+	movi u32 #3 29
+	movi u32 #4 9618          // shade block ▒
+	movi u32 #5 0xFF808080    // fg tmavosivá
+	movi u32 #6 0xFFAAAA00    // bg cyan
+	call fill_rect
+	ret
+
+render_menubar:
+	movi u32 #0 0
+	movi u32 #1 0
+	movi u32 #2 80
+	movi u32 #3 1
+	movi u32 #4 32
+	movi u32 #5 0xFF000000
+	movi u32 #6 0xFFC0C0C0
+	call fill_rect
+
+	load u32 #6 0x0004
+	cmpi u32 #6 1
+	jz mb_file_pressed
+	movi u32 #0 2
+	movi u32 #1 0
+	movi u32 #2 0x0100
+	movi u32 #3 4
+	movi u32 #4 0xFF000000
+	movi u32 #5 0xFFC0C0C0
+	call draw_string
+	movi u32 #0 2
+	movi u32 #1 0
+	movi u32 #2 70
+	movi u32 #3 0xFF0000FF
+	movi u32 #4 0xFFC0C0C0
+	xtchar #0 #1 #2 #3 #4
+	jmp mb_file_done
+mb_file_pressed:
+	movi u32 #0 1
+	movi u32 #1 0
+	movi u32 #2 6
+	movi u32 #3 1
+	movi u32 #4 32
+	movi u32 #5 0xFFFFFFFF
+	movi u32 #6 0xFF000000
+	call fill_rect
+	movi u32 #0 2
+	movi u32 #1 0
+	movi u32 #2 0x0100
+	movi u32 #3 4
+	movi u32 #4 0xFFFFFFFF
+	movi u32 #5 0xFF000000
+	call draw_string
+mb_file_done:
+
+	load u32 #6 0x0004
+	cmpi u32 #6 2
+	jz mb_help_pressed
+	movi u32 #0 10
+	movi u32 #1 0
+	movi u32 #2 0x0140
+	movi u32 #3 4
+	movi u32 #4 0xFF000000
+	movi u32 #5 0xFFC0C0C0
+	call draw_string
+	movi u32 #0 10
+	movi u32 #1 0
+	movi u32 #2 72
+	movi u32 #3 0xFF0000FF
+	movi u32 #4 0xFFC0C0C0
+	xtchar #0 #1 #2 #3 #4
+	jmp mb_help_done
+mb_help_pressed:
+	movi u32 #0 9
+	movi u32 #1 0
+	movi u32 #2 6
+	movi u32 #3 1
+	movi u32 #4 32
+	movi u32 #5 0xFFFFFFFF
+	movi u32 #6 0xFF000000
+	call fill_rect
+	movi u32 #0 10
+	movi u32 #1 0
+	movi u32 #2 0x0140
+	movi u32 #3 4
+	movi u32 #4 0xFFFFFFFF
+	movi u32 #5 0xFF000000
+	call draw_string
+mb_help_done:
+	ret
+
+// ============================================================================
+// FILE / HELP DROPDOWN MENU
+// ============================================================================
+render_file_menu:
+	movi u32 #0 1
+	movi u32 #1 1
+	movi u32 #2 14
+	movi u32 #3 4
+	movi u32 #4 0xFF000000
+	movi u32 #5 0xFFC0C0C0
+	call draw_box
+
+	movi u32 #0 2
+	movi u32 #1 2
+	movi u32 #2 12
+	movi u32 #3 2
+	movi u32 #4 32
+	movi u32 #5 0xFF000000
+	movi u32 #6 0xFFC0C0C0
+	call fill_rect
+
+	movi u32 #0 1
+	movi u32 #1 1
+	movi u32 #2 14
+	movi u32 #3 4
+	call draw_shadow
+
+	// Reboot (row 2)
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 1
+	movi u32 #3 2
+	movi u32 #4 14
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz rfm_reboot_normal
+	movi u32 #0 1
+	movi u32 #1 2
+	movi u32 #2 14
+	movi u32 #3 1
+	movi u32 #4 32
+	movi u32 #5 0xFFFFFFFF
+	movi u32 #6 0xFF000000
+	call fill_rect
+	movi u32 #0 3
+	movi u32 #1 2
+	movi u32 #2 0x0180
+	movi u32 #3 6
+	movi u32 #4 0xFFFFFFFF
+	movi u32 #5 0xFF000000
+	call draw_string
+	jmp rfm_reboot_done
+rfm_reboot_normal:
+	movi u32 #0 3
+	movi u32 #1 2
+	movi u32 #2 0x0180
+	movi u32 #3 6
+	movi u32 #4 0xFF000000
+	movi u32 #5 0xFFC0C0C0
+	call draw_string
+	movi u32 #0 3
+	movi u32 #1 2
+	movi u32 #2 82
+	movi u32 #3 0xFF0000FF
+	movi u32 #4 0xFFC0C0C0
+	xtchar #0 #1 #2 #3 #4
+rfm_reboot_done:
+
+	// Quit (row 3)
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 1
+	movi u32 #3 3
+	movi u32 #4 14
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz rfm_quit_normal
+	movi u32 #0 1
+	movi u32 #1 3
+	movi u32 #2 14
+	movi u32 #3 1
+	movi u32 #4 32
+	movi u32 #5 0xFFFFFFFF
+	movi u32 #6 0xFF000000
+	call fill_rect
+	movi u32 #0 3
+	movi u32 #1 3
+	movi u32 #2 0x01C0
+	movi u32 #3 4
+	movi u32 #4 0xFFFFFFFF
+	movi u32 #5 0xFF000000
+	call draw_string
+	jmp rfm_quit_done
+rfm_quit_normal:
+	movi u32 #0 3
+	movi u32 #1 3
+	movi u32 #2 0x01C0
+	movi u32 #3 4
+	movi u32 #4 0xFF000000
+	movi u32 #5 0xFFC0C0C0
+	call draw_string
+	movi u32 #0 3
+	movi u32 #1 3
+	movi u32 #2 81
+	movi u32 #3 0xFF0000FF
+	movi u32 #4 0xFFC0C0C0
+	xtchar #0 #1 #2 #3 #4
+rfm_quit_done:
+	ret
+
+render_help_menu:
+	movi u32 #0 9
+	movi u32 #1 1
+	movi u32 #2 14
+	movi u32 #3 3
+	movi u32 #4 0xFF000000
+	movi u32 #5 0xFFC0C0C0
+	call draw_box
+
+	movi u32 #0 10
+	movi u32 #1 2
+	movi u32 #2 12
+	movi u32 #3 1
+	movi u32 #4 32
+	movi u32 #5 0xFF000000
+	movi u32 #6 0xFFC0C0C0
+	call fill_rect
+
+	movi u32 #0 9
+	movi u32 #1 1
+	movi u32 #2 14
+	movi u32 #3 3
+	call draw_shadow
+
+	// About (row 2)
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 9
+	movi u32 #3 2
+	movi u32 #4 14
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz rhm_about_normal
+	movi u32 #0 9
+	movi u32 #1 2
+	movi u32 #2 14
+	movi u32 #3 1
+	movi u32 #4 32
+	movi u32 #5 0xFFFFFFFF
+	movi u32 #6 0xFF000000
+	call fill_rect
+	movi u32 #0 11
+	movi u32 #1 2
+	movi u32 #2 0x0200
+	movi u32 #3 5
+	movi u32 #4 0xFFFFFFFF
+	movi u32 #5 0xFF000000
+	call draw_string
+	jmp rhm_about_done
+rhm_about_normal:
+	movi u32 #0 11
+	movi u32 #1 2
+	movi u32 #2 0x0200
+	movi u32 #3 5
+	movi u32 #4 0xFF000000
+	movi u32 #5 0xFFC0C0C0
+	call draw_string
+	movi u32 #0 11
+	movi u32 #1 2
+	movi u32 #2 65
+	movi u32 #3 0xFF0000FF
+	movi u32 #4 0xFFC0C0C0
+	xtchar #0 #1 #2 #3 #4
+rhm_about_done:
+	ret
+
+// ============================================================================
+// WELCOME DIALOG (box 18,10,44x9)
+// ============================================================================
+render_welcome_dialog:
+	movi u32 #0 18
+	movi u32 #1 10
+	movi u32 #2 44
+	movi u32 #3 9
+	movi u32 #4 0xFFFFFFFF
+	movi u32 #5 0xFFAA0000
+	call draw_box
+
+	movi u32 #0 19
+	movi u32 #1 11
+	movi u32 #2 42
+	movi u32 #3 7
+	movi u32 #4 32
+	movi u32 #5 0xFFFFFFFF
+	movi u32 #6 0xFFAA0000
+	call fill_rect
+
+	movi u32 #0 18
+	movi u32 #1 10
+	movi u32 #2 44
+	movi u32 #3 0
+	movi u32 #4 0x0280
+	movi u32 #5 7
+	movi u32 #6 0xFF00FFFF
+	movi u32 #7 0xFFAA0000
+	call draw_centered_string
+
+	movi u32 #0 18
+	movi u32 #1 10
+	movi u32 #2 44
+	movi u32 #3 2
+	movi u32 #4 0x02C0
+	movi u32 #5 40
+	movi u32 #6 0xFFFFFFFF
+	movi u32 #7 0xFFAA0000
+	call draw_centered_string
+
+	movi u32 #0 18
+	movi u32 #1 10
+	movi u32 #2 44
+	movi u32 #3 3
+	movi u32 #4 0x0300
+	movi u32 #5 40
+	movi u32 #6 0xFFFFFFFF
+	movi u32 #7 0xFFAA0000
+	call draw_centered_string
+
+	movi u32 #0 18
+	movi u32 #1 10
+	movi u32 #2 44
+	movi u32 #3 4
+	movi u32 #4 0x0340
+	movi u32 #5 35
+	movi u32 #6 0xFFFFFFFF
+	movi u32 #7 0xFFAA0000
+	call draw_centered_string
+
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 36
+	movi u32 #3 16
+	movi u32 #4 8
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz rwd_ok_normal
+	movi u32 #0 36
+	movi u32 #1 16
+	movi u32 #2 8
+	movi u32 #3 1
+	movi u32 #4 32
+	movi u32 #5 0xFF000000
+	movi u32 #6 0xFFFFFFFF
+	call fill_rect
+	movi u32 #0 37
+	movi u32 #1 16
+	movi u32 #2 0x0240
+	movi u32 #3 6
+	movi u32 #4 0xFF000000
+	movi u32 #5 0xFFFFFFFF
+	call draw_string
+	jmp rwd_ok_done
+rwd_ok_normal:
+	movi u32 #0 37
+	movi u32 #1 16
+	movi u32 #2 0x0240
+	movi u32 #3 6
+	movi u32 #4 0xFFFFFFFF
+	movi u32 #5 0xFFAA0000
+	call draw_string
+rwd_ok_done:
+
+	movi u32 #0 18
+	movi u32 #1 10
+	movi u32 #2 44
+	movi u32 #3 9
+	call draw_shadow
+	ret
+
+// ============================================================================
+// ABOUT DIALOG (box 20,10,40x10)
+// ============================================================================
+render_about_dialog:
+	movi u32 #0 20
+	movi u32 #1 10
+	movi u32 #2 40
+	movi u32 #3 10
+	movi u32 #4 0xFFFFFFFF
+	movi u32 #5 0xFFAA0000
+	call draw_box
+
+	movi u32 #0 21
+	movi u32 #1 11
+	movi u32 #2 38
+	movi u32 #3 8
+	movi u32 #4 32
+	movi u32 #5 0xFFFFFFFF
+	movi u32 #6 0xFFAA0000
+	call fill_rect
+
+	movi u32 #0 20
+	movi u32 #1 10
+	movi u32 #2 40
+	movi u32 #3 0
+	movi u32 #4 0x0380
+	movi u32 #5 5
+	movi u32 #6 0xFF00FFFF
+	movi u32 #7 0xFFAA0000
+	call draw_centered_string
+
+	movi u32 #0 20
+	movi u32 #1 10
+	movi u32 #2 40
+	movi u32 #3 2
+	movi u32 #4 0x03C0
+	movi u32 #5 24
+	movi u32 #6 0xFFFFFFFF
+	movi u32 #7 0xFFAA0000
+	call draw_centered_string
+
+	movi u32 #0 20
+	movi u32 #1 10
+	movi u32 #2 40
+	movi u32 #3 3
+	movi u32 #4 0x0400
+	movi u32 #5 11
+	movi u32 #6 0xFFFFFFFF
+	movi u32 #7 0xFFAA0000
+	call draw_centered_string
+
+	movi u32 #0 20
+	movi u32 #1 10
+	movi u32 #2 40
+	movi u32 #3 4
+	movi u32 #4 0x0440
+	movi u32 #5 26
+	movi u32 #6 0xFFFFFFFF
+	movi u32 #7 0xFFAA0000
+	call draw_centered_string
+
+	movi u32 #0 20
+	movi u32 #1 10
+	movi u32 #2 40
+	movi u32 #3 5
+	movi u32 #4 0x0480
+	movi u32 #5 8
+	movi u32 #6 0xFFFFFFFF
+	movi u32 #7 0xFFAA0000
+	call draw_centered_string
+
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 36
+	movi u32 #3 17
+	movi u32 #4 8
+	movi u32 #5 1
+	call hit_test
+	cmpi u32 #0 0
+	jz rad_ok_normal
+	movi u32 #0 36
+	movi u32 #1 17
+	movi u32 #2 8
+	movi u32 #3 1
+	movi u32 #4 32
+	movi u32 #5 0xFF000000
+	movi u32 #6 0xFFFFFFFF
+	call fill_rect
+	movi u32 #0 37
+	movi u32 #1 17
+	movi u32 #2 0x0240
+	movi u32 #3 6
+	movi u32 #4 0xFF000000
+	movi u32 #5 0xFFFFFFFF
+	call draw_string
+	jmp rad_ok_done
+rad_ok_normal:
+	movi u32 #0 37
+	movi u32 #1 17
+	movi u32 #2 0x0240
+	movi u32 #3 6
+	movi u32 #4 0xFFFFFFFF
+	movi u32 #5 0xFFAA0000
+	call draw_string
+rad_ok_done:
+
+	movi u32 #0 20
+	movi u32 #1 10
+	movi u32 #2 40
+	movi u32 #3 10
+	call draw_shadow
+	ret
+
+// ============================================================================
+// MOUSE CURSOR (last layer) - see cursortxt.quartz
+// ============================================================================
+draw_cursor:
+	load u32 #0 0x0008
+	load u32 #1 0x000C
+	movi u32 #2 9608          // plny blok
+	movi u32 #3 0x77FFFFFF
+	movi u32 #4 0x77FFFFFF
+	xtchar #0 #1 #2 #3 #4
+	ret
+
+// ============================================================================
+// GENERIC DRAWING SUBROUTINES
+// ============================================================================
+
+// fill_rect: #0=x #1=y #2=w #3=h #4=ch #5=fg #6=bg
+fill_rect:
+	mov  #9 #1
+	add  u32 #9 #3
+	mov  #8 #1
+fr_row:
+	mov  #10 #0
+	add  u32 #10 #2
+	mov  #11 #0
+fr_col:
+	xtchar #11 #8 #4 #5 #6
+	addi u32 #11 1
+	cmp  u32 #11 #10
+	jl fr_col
+	addi u32 #8 1
+	cmp  u32 #8 #9
+	jl fr_row
+	ret
+
+// draw_string: #0=x #1=y #2=addr #3=len #4=fg #5=bg
+draw_string:
+	movi u32 #6 0
+ds_loop:
+	loadr u8 #7 #2
+	mov  #8 #0
+	add  u32 #8 #6
+	xtchar #8 #1 #7 #4 #5
+	addi u32 #2 1
+	addi u32 #6 1
+	cmp  u32 #6 #3
+	jl ds_loop
+	ret
+
+// draw_centered_string: #0=box_x #1=box_y #2=box_w #3=row_offset #4=addr #5=len #6=fg #7=bg
+draw_centered_string:
+	mov  #8 #2
+	sub  u32 #8 #5
+	movi u32 #9 2
+	div  u32 #8 #9
+	add  u32 #8 #0
+	mov  #9 #1
+	add  u32 #9 #3
+	mov  #0 #8
+	mov  #1 #9
+	mov  #2 #4
+	mov  #3 #5
+	mov  #4 #6
+	mov  #5 #7
+	call draw_string
+	ret
+
+// draw_box: double-line border. #0=x #1=y #2=w #3=h #4=fg #5=bg
+draw_box:
+	movi u32 #6 9556
+	xtchar #0 #1 #6 #4 #5
+	mov  #7 #0
+	add  u32 #7 #2
+	subi u32 #7 1
+	movi u32 #6 9559
+	xtchar #7 #1 #6 #4 #5
+	mov  #8 #1
+	add  u32 #8 #3
+	subi u32 #8 1
+	movi u32 #6 9562
+	xtchar #0 #8 #6 #4 #5
+	movi u32 #6 9565
+	xtchar #7 #8 #6 #4 #5
+
+	mov  #9 #0
+	addi u32 #9 1
+	movi u32 #10 9552
+db_top:
+	cmp  u32 #9 #7
+	jge db_top_done
+	xtchar #9 #1 #10 #4 #5
+	xtchar #9 #8 #10 #4 #5
+	addi u32 #9 1
+	jmp db_top
+db_top_done:
+
+	mov  #9 #1
+	addi u32 #9 1
+	movi u32 #10 9553
+dbv:
+	cmp  u32 #9 #8
+	jge dbv_done
+	xtchar #0 #9 #10 #4 #5
+	xtchar #7 #9 #10 #4 #5
+	addi u32 #9 1
+	jmp dbv
+dbv_done:
+	ret
+
+// draw_shadow: #0=x #1=y #2=w #3=h  (bottom-right drop shadow, ▒-style)
+draw_shadow:
+	movi u32 #4 9617
+	movi u32 #5 0xFF404040
+	movi u32 #6 0xFF000000
+	mov  #7 #0
+	addi u32 #7 1
+	mov  #8 #1
+	add  u32 #8 #3
+	mov  #9 #7
+	add  u32 #9 #2
+ds_bot:
+	cmp  u32 #7 #9
+	jge ds_bot_done
+	xtchar #7 #8 #4 #5 #6
+	addi u32 #7 1
+	jmp ds_bot
+ds_bot_done:
+	mov  #7 #0
+	add  u32 #7 #2
+	mov  #8 #1
+	addi u32 #8 1
+	mov  #9 #8
+	add  u32 #9 #3
+ds_right:
+	cmp  u32 #8 #9
+	jge ds_right_done
+	xtchar #7 #8 #4 #5 #6
+	addi u32 #8 1
+	jmp ds_right
+ds_right_done:
+	ret
+
+// hit_test: #0=mx #1=my #2=rx #3=ry #4=rw #5=rh -> #0 = 1/0
+hit_test:
+	cmp  i32 #0 #2
+	jl ht_no
+	mov  #6 #2
+	add  i32 #6 #4
+	cmp  i32 #0 #6
+	jge ht_no
+	cmp  i32 #1 #3
+	jl ht_no
+	mov  #6 #3
+	add  i32 #6 #5
+	cmp  i32 #1 #6
+	jge ht_no
+	movi u32 #0 1
+	ret
+ht_no:
+	movi u32 #0 0
+	ret

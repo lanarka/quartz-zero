@@ -1,0 +1,196 @@
+%runtime 255
+%entrypoint start
+
+start:
+	call init
+	jmp main_loop
+
+// ============================================================================
+// INIT
+// ============================================================================
+init:
+	beep
+	movi u32 #0 0xFF000000
+	xclearc #0
+
+	movi u32 #0 0
+	store u32 0x0000 #0        // pixel_idx = 0
+
+	movi f32 #0 1.0
+	store f32 0x0004 #0        // zoom = 1.0
+
+	movi f32 #0 -0.743643887037151
+	store f32 0x0008 #0        // center_x
+
+	movi f32 #0 0.131825904205330
+	store f32 0x000C #0        // center_y
+
+	movi u32 #0 50
+	store u32 0x0010 #0        // maxiter = 50
+
+	call fill_palette
+	call fill_lut_x
+	call fill_lut_y
+	ret
+
+fill_palette:
+%include "mandel_palette.quartz"
+	ret
+
+fill_lut_x:
+%include "mandel_lutx.quartz"
+	ret
+
+fill_lut_y:
+%include "mandel_luty.quartz"
+	ret
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+main_loop:
+	movi u32 #0 0
+	store u32 0x0018 #0          // batch_i = 0
+
+mb_batch_loop:
+	load u32 #0 0x0000
+	cmpi u32 #0 307200
+	jl mb_have_pixel
+	call next_pass
+
+mb_have_pixel:
+	load u32 #0 0x0000
+	mov  #1 #0
+	movi u32 #2 640
+	mod  u32 #1 #2               // px = idx % 640
+	mov  #2 #0
+	movi u32 #3 640
+	div  u32 #2 #3               // py = idx / 640
+	mov  #0 #1
+	mov  #1 #2
+	call compute_pixel
+
+	load u32 #0 0x0000
+	addi u32 #0 1
+	store u32 0x0000 #0
+
+	load u32 #0 0x0018
+	addi u32 #0 1
+	store u32 0x0018 #0
+	cmpi u32 #0 250
+	jl mb_batch_loop
+
+	xvsync 0
+	jmp main_loop
+
+// next_pass: zoom *= 0.78, maxiter += 10 (cap 400)
+next_pass:
+	load f32 #0 0x0004
+	movi f32 #1 0.78
+	mul  f32 #0 #1
+	cmpi f32 #0 0.0000005
+	jg   np_continue
+
+	movi f32 #0 1.0
+	store f32 0x0004 #0
+	movi u32 #1 50
+	store u32 0x0010 #1
+	jmp  np_reset_idx
+
+np_continue:
+	store f32 0x0004 #0
+	load u32 #1 0x0010
+	addi u32 #1 10
+	cmpi u32 #1 400
+	jle  np_iter_ok
+	movi u32 #1 400
+np_iter_ok:
+	store u32 0x0010 #1
+
+np_reset_idx:
+	movi u32 #0 0
+	store u32 0x0000 #0
+	ret
+
+compute_pixel:
+	// ux = LUT_X[px]
+	mov  #2 #0
+	movi u32 #3 4
+	mul  u32 #2 #3
+	movi u32 #3 0x0200
+	add  u32 #2 #3
+	loadr f32 #2 #2
+
+	// uy = LUT_Y[py]
+	mov  #3 #1
+	movi u32 #4 4
+	mul  u32 #3 #4
+	movi u32 #4 0x0C00
+	add  u32 #3 #4
+	loadr f32 #3 #3
+
+	load f32 #4 0x0004          // zoom
+	load f32 #5 0x0008          // center_x
+	load f32 #6 0x000C          // center_y
+
+	// cx = center_x + ux*zoom
+	mov  #7 #2
+	mul  f32 #7 #4
+	add  f32 #7 #5
+
+	// cy = center_y + uy*zoom
+	mov  #8 #3
+	mul  f32 #8 #4
+	add  f32 #8 #6
+
+	movi f32 #9 0.0             // zr
+	movi f32 #10 0.0            // zi
+	movi u32 #11 0               // iter
+	load u32 #12 0x0010          // maxiter
+
+cp_loop:
+	mov  #13 #9
+	mul  f32 #13 #9              // zr2
+	mov  #14 #10
+	mul  f32 #14 #10              // zi2
+	mov  #15 #13
+	add  f32 #15 #14               // sum = zr2+zi2
+	cmpi f32 #15 4.0
+	jg   cp_escaped
+	cmp  u32 #11 #12
+	jge  cp_inset
+
+	// zi_new = 2*zr*zi + cy
+	mov  #2 #9
+	mul  f32 #2 #10
+	movi f32 #3 2.0
+	mul  f32 #2 #3
+	add  f32 #2 #8
+
+	// zr_new = zr2 - zi2 + cx
+	mov  #3 #13
+	sub  f32 #3 #14
+	add  f32 #3 #7
+
+	mov  #9 #3
+	mov  #10 #2
+	addi u32 #11 1
+	jmp  cp_loop
+
+cp_escaped:
+	mov  #2 #11
+	movi u32 #3 63
+	and  u32 #2 #3               // iter & 63  (== iter mod 64)
+	movi u32 #3 4
+	mul  u32 #2 #3
+	movi u32 #3 0x0100
+	add  u32 #2 #3
+	loadr u32 #2 #2
+	jmp  cp_draw
+
+cp_inset:
+	movi u32 #2 0xFF000000
+
+cp_draw:
+	xpix #0 #1 #2
+	ret

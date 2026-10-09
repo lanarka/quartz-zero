@@ -1,0 +1,27 @@
+movi i32 #9 5000000
+
+loop:
+	rnd #0 80 // 30
+	rnd #1 30 // 80
+	rnd #2 748 // glyphs
+
+	rnd #3 0x00ffffff
+	addi u32 #3 0xff000000
+
+	rnd #4 0x00ffffff
+	addi u32 #4 0xff000000
+	
+	xtchar #0 #1 #2 #3 #4
+
+
+	xvsync 10000
+	jmp loop
+
+
+	cmpi i32 #9 0
+	jz done
+	dec i32 #9
+	jmp loop
+
+done:
+	halt

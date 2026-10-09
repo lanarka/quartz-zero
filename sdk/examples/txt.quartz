@@ -1,0 +1,91 @@
+movi u16 #0 0
+movi u16 #1 0
+movi u16 #2 2
+movi u16 #3 1
+
+movi u8 #5 'H'
+store u8 1000 #5
+movi u8 #5 0
+store u8 1001 #5
+movi u32 #5 0xFF0000FF // A B G R
+store u32 1002 #5
+movi u32 #5 0xFF00FF00 
+store u32 1006 #5
+
+movi u8 #5 'i'
+store u8 1010 #5
+movi u8 #5 0
+store u8 1011 #5
+movi u32 #5 0xFF0000FF // A B G R
+store u32 1012 #5
+movi u32 #5 0xFF00FF00 
+store u32 1016 #5
+
+movi u32 #8 1000
+xtframe #0 #1 #2 #3 #8
+
+
+
+
+
+
+movi u16 #0 1
+movi u16 #1 2
+movi u16 #2 65
+movi u32 #3 0xFFFFFFFF
+movi u32 #4 0x000000FF
+xtchar #0 #1 #2 #3 #4
+
+
+
+
+movi u16 #0 5
+movi u16 #1 6
+xtcurset #0 #1
+
+
+
+movi u8 #0 1
+xtcurena #0
+
+xtcurget #0 #1
+print u16 #0
+print u16 #1
+
+xtgetres #0 #1
+print u16 #0
+print u16 #1
+
+
+movi i32 #9 100000000
+
+loop:
+	xvsync 0
+	/*ximouse #0 #1 #2
+	print u16 #0
+	print u16 #1
+	print u8 #2*/
+
+	/*movi u32 #4 0x2010
+	xipoll #0 #1 #2 #3 #4
+	print u16 #0
+	print u16 #1
+	print u8 #2
+	print u32 #3
+	load u8 #5 0x2010
+	print u8 #5*/
+
+	movi u32 #1 0x2000
+	xikey #0 #1
+	print u8 #0
+	load u8 #5 0x2000
+	print u8 #5
+
+
+	cmpi i32 #9 0
+	jz done
+	dec i32 #9
+	jmp loop
+
+done:
+	halt

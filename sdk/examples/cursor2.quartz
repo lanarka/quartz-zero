@@ -1,0 +1,241 @@
+// ============================================================================
+// cursor.quartz - custom mouse cursor, now with REAL alpha.
+//
+// The screen size is NOT hardcoded (640x480) - it is determined at runtime
+// via xgetres (OP_GFX_GETRES), so the program works correctly with any
+// --videomode (1/2/3).
+//
+// IMPORTANT: the entire screen buffer (screen_w * screen_h * 4 bytes) must
+// fit into RAM, plus the cursor buffer and some headroom. The largest mode
+// (3, 1280x960) needs as much as 1280*960*4 = 4,915,200 bytes just for the
+// background - so run it with a sufficiently large --ram (e.g. 5000000, so
+// it's enough for all 3 modes):
+//
+//     quartz cursor.quartz --cursor 0 --ram 5000000
+//
+// (the default 32768 bytes would not be enough - it would return a "does
+// not fit" error).
+//
+// Instead of xclear (which leaves a transparent/black background), here
+// every frame we redraw the WHOLE screen with our own prepared green
+// buffer - this also covers up the cursor's previous position (same effect
+// as xclear, just with a color instead of transparency).
+//
+// FIX (alpha now WORKS):
+// xframe/rt_frame in runtime.c was modified so that on every call it does
+// correct per-pixel alpha blending against what's already in the
+// framebuffer (source-over compositing), instead of a raw memcpy. Thanks to
+// this it is no longer necessary to fill the cursor's "empty" pixels with
+// the same color as the background - it's enough to use real transparency
+// (alpha = 0x00) and the cursor will composite correctly over ANY
+// background (even an image, not just a solid-color area).
+//
+// Filling such a large background buffer (screen_w*screen_h pixels) takes
+// a few frames at startup (the INSTRUCTIONS_PER_FRAME cap) - a short,
+// almost invisible effect before the first redraw appears.
+// ============================================================================
+
+// --- register map -----------------------------------------------------
+// #0  mouse_x     (at runtime: current mouse x-coordinate)
+// #1  mouse_y     (at runtime: current mouse y-coordinate)
+// #2  cursor_w    (10, constant)
+// #3  cursor_h    (16, constant)
+// #4  cursor_addr (0x2000, constant - cursor arrow pixel buffer)
+// #5  scratch     (temporary: white color while filling the cursor buffer / mouse_btn)
+// #6  zero        (0, constant - used as both x AND y for the background xframe)
+// #7  screen_w    (from xgetres, dynamic - NOT hardcoded to 640)
+// #8  screen_h    (from xgetres, dynamic - NOT hardcoded to 480)
+// #9  bg_addr     (0x10000, constant - full-screen background buffer)
+// #10 scratch     (temporary: TRANSPARENT color while filling the cursor's "empty" pixels)
+
+	movi u16 #2 10
+	movi u16 #3 16
+	movi u32 #4 0x2000
+	movi u16 #6 0
+	xgetres #8 #7          // #8 = screen_h, #7 = screen_w (dynamic, based on --videomode)
+	movi u32 #9 0x10000
+
+// --- fill the cursor arrow buffer (160 pixels, 68 white + 92 transparent) ---
+	movi u32 #5 0xFFFFFFFF    // white, opaque (A=0xFF)
+	movi u32 #10 0x00000000   // REAL transparency (A=0x00) - xframe can already blend
+	store u32 0x2000 #5
+	store u32 0x2004 #10
+	store u32 0x2008 #10
+	store u32 0x200C #10
+	store u32 0x2010 #10
+	store u32 0x2014 #10
+	store u32 0x2018 #10
+	store u32 0x201C #10
+	store u32 0x2020 #10
+	store u32 0x2024 #10
+	store u32 0x2028 #5
+	store u32 0x202C #5
+	store u32 0x2030 #10
+	store u32 0x2034 #10
+	store u32 0x2038 #10
+	store u32 0x203C #10
+	store u32 0x2040 #10
+	store u32 0x2044 #10
+	store u32 0x2048 #10
+	store u32 0x204C #10
+	store u32 0x2050 #5
+	store u32 0x2054 #5
+	store u32 0x2058 #5
+	store u32 0x205C #10
+	store u32 0x2060 #10
+	store u32 0x2064 #10
+	store u32 0x2068 #10
+	store u32 0x206C #10
+	store u32 0x2070 #10
+	store u32 0x2074 #10
+	store u32 0x2078 #5
+	store u32 0x207C #5
+	store u32 0x2080 #5
+	store u32 0x2084 #5
+	store u32 0x2088 #10
+	store u32 0x208C #10
+	store u32 0x2090 #10
+	store u32 0x2094 #10
+	store u32 0x2098 #10
+	store u32 0x209C #10
+	store u32 0x20A0 #5
+	store u32 0x20A4 #5
+	store u32 0x20A8 #5
+	store u32 0x20AC #5
+	store u32 0x20B0 #5
+	store u32 0x20B4 #10
+	store u32 0x20B8 #10
+	store u32 0x20BC #10
+	store u32 0x20C0 #10
+	store u32 0x20C4 #10
+	store u32 0x20C8 #5
+	store u32 0x20CC #5
+	store u32 0x20D0 #5
+	store u32 0x20D4 #5
+	store u32 0x20D8 #5
+	store u32 0x20DC #5
+	store u32 0x20E0 #10
+	store u32 0x20E4 #10
+	store u32 0x20E8 #10
+	store u32 0x20EC #10
+	store u32 0x20F0 #5
+	store u32 0x20F4 #5
+	store u32 0x20F8 #5
+	store u32 0x20FC #5
+	store u32 0x2100 #5
+	store u32 0x2104 #5
+	store u32 0x2108 #5
+	store u32 0x210C #10
+	store u32 0x2110 #10
+	store u32 0x2114 #10
+	store u32 0x2118 #5
+	store u32 0x211C #5
+	store u32 0x2120 #5
+	store u32 0x2124 #5
+	store u32 0x2128 #5
+	store u32 0x212C #5
+	store u32 0x2130 #5
+	store u32 0x2134 #5
+	store u32 0x2138 #10
+	store u32 0x213C #10
+	store u32 0x2140 #5
+	store u32 0x2144 #5
+	store u32 0x2148 #5
+	store u32 0x214C #5
+	store u32 0x2150 #5
+	store u32 0x2154 #5
+	store u32 0x2158 #5
+	store u32 0x215C #5
+	store u32 0x2160 #5
+	store u32 0x2164 #10
+	store u32 0x2168 #5
+	store u32 0x216C #5
+	store u32 0x2170 #5
+	store u32 0x2174 #5
+	store u32 0x2178 #5
+	store u32 0x217C #10
+	store u32 0x2180 #10
+	store u32 0x2184 #10
+	store u32 0x2188 #10
+	store u32 0x218C #10
+	store u32 0x2190 #5
+	store u32 0x2194 #5
+	store u32 0x2198 #5
+	store u32 0x219C #10
+	store u32 0x21A0 #5
+	store u32 0x21A4 #5
+	store u32 0x21A8 #10
+	store u32 0x21AC #10
+	store u32 0x21B0 #10
+	store u32 0x21B4 #10
+	store u32 0x21B8 #5
+	store u32 0x21BC #5
+	store u32 0x21C0 #10
+	store u32 0x21C4 #10
+	store u32 0x21C8 #10
+	store u32 0x21CC #5
+	store u32 0x21D0 #5
+	store u32 0x21D4 #10
+	store u32 0x21D8 #10
+	store u32 0x21DC #10
+	store u32 0x21E0 #5
+	store u32 0x21E4 #10
+	store u32 0x21E8 #10
+	store u32 0x21EC #10
+	store u32 0x21F0 #10
+	store u32 0x21F4 #10
+	store u32 0x21F8 #5
+	store u32 0x21FC #5
+	store u32 0x2200 #10
+	store u32 0x2204 #10
+	store u32 0x2208 #10
+	store u32 0x220C #10
+	store u32 0x2210 #10
+	store u32 0x2214 #10
+	store u32 0x2218 #10
+	store u32 0x221C #10
+	store u32 0x2220 #5
+	store u32 0x2224 #5
+	store u32 0x2228 #10
+	store u32 0x222C #10
+	store u32 0x2230 #10
+	store u32 0x2234 #10
+	store u32 0x2238 #10
+	store u32 0x223C #10
+	store u32 0x2240 #10
+	store u32 0x2244 #10
+	store u32 0x2248 #10
+	store u32 0x224C #5
+	store u32 0x2250 #5
+	store u32 0x2254 #10
+	store u32 0x2258 #10
+	store u32 0x225C #10
+	store u32 0x2260 #10
+	store u32 0x2264 #10
+	store u32 0x2268 #10
+	store u32 0x226C #10
+	store u32 0x2270 #10
+	store u32 0x2274 #5
+	store u32 0x2278 #5
+	store u32 0x227C #10
+
+// --- fill the full-screen background with a dark green color -----------
+// Uses #0,#1,#5 as temporary registers (mouse_x/mouse_y aren't used yet,
+// since ximouse is only called for the first time in main_loop).
+	mov  #0 #9                 // #0 = running write pointer into the bg buffer
+	mov  #1 #7
+	mul  u32 #1 #8              // #1 = screen_w * screen_h = number of pixels (dynamic)
+	movi u32 #5 0xFF555555      // #5 = background, opaque (A=0xFF) - could also be an image
+fill_bg_loop:
+	storer u32 #0 #5
+	addi   u32 #0 4
+	subi   u32 #1 1
+	cmpi   u32 #1 0
+	jnz fill_bg_loop
+
+main_loop:
+	xframe #6 #6 #7 #8 #9      // redraw the whole background (replaces xclear)
+	ximouse #0 #1 #5           // #0=mouse_x #1=mouse_y #5=mouse_btn (unused)
+	xframe #0 #1 #2 #3 #4      // draw the cursor at the mouse position - now with real alpha
+	xvsync 0
+	jmp main_loop

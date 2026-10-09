@@ -1,0 +1,107 @@
+// ============================================================================
+// cursor.quartz - custom mouse cursor.
+//
+// Draws a classic white arrow (10x16 pixels) exactly at the current position
+// of the system mouse cursor, every frame.
+//
+// RAM is always zeroed out when the VM starts (calloc), so the arrow's pixel
+// buffer already starts as "all transparent" (R=G=B=A=0) - so it's enough to
+// write only the pixels that should be white and opaque (opaque white =
+// 0xFFFFFFFF). The rest of the buffer stays transparent automatically, so
+// the arrow has a real (non-square) shape - the gfx layer is drawn with
+// alpha blending over the text layer and over whatever is already on
+// screen.
+//
+// Run with "--cursor 0" to hide the system (OS) cursor so only this
+// custom-drawn one is visible.
+// ============================================================================
+
+// --- register map -----------------------------------------------------
+// #0  mouse_x   (current mouse x-coordinate, overwritten every frame)
+// #1  mouse_y   (current mouse y-coordinate)
+// #2  cursor_w  (10, constant)
+// #3  cursor_h  (16, constant)
+// #4  buf_addr  (0x2000, constant - address of the arrow's pixel buffer)
+// #5  scratch   (temporary: mouse_btn from ximouse / white color during init)
+
+	movi u16 #2 10
+	movi u16 #3 16
+	movi u32 #4 0x2000
+
+// --- fill the arrow buffer (68 white pixels, the rest stays RAM 0 = transparent) ---
+	movi u32 #5 0xFFFFFFFF
+	store u32 0x2000 #5
+	store u32 0x2028 #5
+	store u32 0x202C #5
+	store u32 0x2050 #5
+	store u32 0x2054 #5
+	store u32 0x2058 #5
+	store u32 0x2078 #5
+	store u32 0x207C #5
+	store u32 0x2080 #5
+	store u32 0x2084 #5
+	store u32 0x20A0 #5
+	store u32 0x20A4 #5
+	store u32 0x20A8 #5
+	store u32 0x20AC #5
+	store u32 0x20B0 #5
+	store u32 0x20C8 #5
+	store u32 0x20CC #5
+	store u32 0x20D0 #5
+	store u32 0x20D4 #5
+	store u32 0x20D8 #5
+	store u32 0x20DC #5
+	store u32 0x20F0 #5
+	store u32 0x20F4 #5
+	store u32 0x20F8 #5
+	store u32 0x20FC #5
+	store u32 0x2100 #5
+	store u32 0x2104 #5
+	store u32 0x2108 #5
+	store u32 0x2118 #5
+	store u32 0x211C #5
+	store u32 0x2120 #5
+	store u32 0x2124 #5
+	store u32 0x2128 #5
+	store u32 0x212C #5
+	store u32 0x2130 #5
+	store u32 0x2134 #5
+	store u32 0x2140 #5
+	store u32 0x2144 #5
+	store u32 0x2148 #5
+	store u32 0x214C #5
+	store u32 0x2150 #5
+	store u32 0x2154 #5
+	store u32 0x2158 #5
+	store u32 0x215C #5
+	store u32 0x2160 #5
+	store u32 0x2168 #5
+	store u32 0x216C #5
+	store u32 0x2170 #5
+	store u32 0x2174 #5
+	store u32 0x2178 #5
+	store u32 0x2190 #5
+	store u32 0x2194 #5
+	store u32 0x2198 #5
+	store u32 0x21A0 #5
+	store u32 0x21A4 #5
+	store u32 0x21B8 #5
+	store u32 0x21BC #5
+	store u32 0x21CC #5
+	store u32 0x21D0 #5
+	store u32 0x21E0 #5
+	store u32 0x21F8 #5
+	store u32 0x21FC #5
+	store u32 0x2220 #5
+	store u32 0x2224 #5
+	store u32 0x224C #5
+	store u32 0x2250 #5
+	store u32 0x2274 #5
+	store u32 0x2278 #5
+
+main_loop:
+	xclear
+	ximouse #0 #1 #5      // #0=mouse_x #1=mouse_y #5=mouse_btn (unused)
+	xframe  #0 #1 #2 #3 #4
+	xvsync 0
+	jmp main_loop

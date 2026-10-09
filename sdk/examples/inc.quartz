@@ -1,0 +1,14 @@
+label1:
+	movi i32 #0 3
+	print i32 #0
+	jmp label2
+
+label2:
+	movi i32 #0 4
+	print i32 #0
+	halt
+
+prog:
+	movi i32 #0 99
+	print i32 #0
+	ret

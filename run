@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+RAM_SIZE=8388608 # 8MB
+
+if [ -z "$1" ]; then
+    echo "Missing first parameter"
+    exit 1
+fi
+rm -rf dist/*
+mkdir -p dist/
+
+python3 sdk/qasm/qasm.py sdk/examples/$1.quartz dist/$1.bin \
+	--map dist/$1.map --cast-warnings && 
+
+python3 sdk/qasm/qdisasm.py dist/$1.bin > dist/$1.dis.quartz && 
+python3 sdk/qasm/qasm.py dist/$1.dis.quartz dist/$1-dis.bin && 
+#diff dist/$1.bin dist/$1-dis.bin &&
+
+./build/quartz dist/$1.bin \
+    --dump dist/$1.ram \
+    --ram ${RAM_SIZE} \
+#    --net /tmp/quartz.sock

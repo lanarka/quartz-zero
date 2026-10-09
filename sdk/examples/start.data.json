@@ -1,0 +1,6 @@
+{
+	"start": "0x00002300",
+	"blobs": [
+		{"Logo": {"from_file": "logo.dat"}}
+	]
+}

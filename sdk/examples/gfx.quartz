@@ -1,0 +1,38 @@
+	movi u16 #1 40
+	movi u16 #2 4
+	movi u16 #3 4
+	movi u32 #4 0x001000
+	movi u16 #0 0
+	movi u32 #5 0xFF0000FF // ABGR A=FF B=00 G=00 R=FF
+	store u32 0x001000 #5
+	store u32 0x001004 #5
+	store u32 0x001008 #5
+	store u32 0x00100c #5
+	store u32 0x001010 #5
+	store u32 0x001014 #5
+	store u32 0x001018 #5
+	store u32 0x00101c #5
+	store u32 0x001020 #5
+	store u32 0x001024 #5
+	store u32 0x001028 #5
+	store u32 0x00102c #5
+	store u32 0x001030 #5
+	store u32 0x001034 #5
+	store u32 0x001038 #5
+	store u32 0x00103c #5
+
+loop:
+	xframe #0 #1 #2 #3 #4
+	xvsync 0
+
+	//inc u16 #0
+	addi u16 #0 4 // 12
+
+	cmpi u16 #0 640
+	jge reset
+	jmp loop
+
+reset:
+	movi u16 #0 0
+	jmp loop
+  

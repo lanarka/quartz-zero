@@ -1,0 +1,26 @@
+/*
+	DEMO
+*/
+%runtime 255
+%entrypoint start
+%include "inc.quartz"
+
+start:
+	beep
+
+	movi u32 #9 1000000
+
+	call inc@prog
+	movi i32 #0 0
+	print i32 #0
+	jmp label1
+
+label2:
+	movi i32 #0 2
+	print i32 #0
+	jmp inc@label1
+
+label1:
+	movi i32 #0 1
+	print i32 #0
+	jmp label2

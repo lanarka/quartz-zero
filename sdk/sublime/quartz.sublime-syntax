@@ -1,0 +1,67 @@
+%YAML 1.2
+---
+
+file_extensions:
+  - quartz
+
+scope: source.quartz
+contexts:
+  main:
+    # String
+    - match: '"'
+      scope: punctuation.definition.string.begin.quartz
+      push: double_quoted_string
+
+    # Decimal Number
+    - match: '\b(-)?[0-9.]+\b'
+      scope: keyword.control.quartz
+
+    # Hexadecimal Number
+    - match: (0[xX])((?:_?\h)+)
+      scope: keyword.control.quartz
+
+    # Line Comment
+    - match: '//'
+      scope: punctuation.definition.comment.quartz
+      push: line_comment
+
+    # Block Comment
+    - match: '/\*'
+      scope: punctuation.definition.comment.quartz
+      push: 
+        - meta_scope: comment.block.quartz
+        - match: '\*/'
+          pop: true
+
+    # Type Specificator
+    - match: '\b(i8|i16|i32|i64|f32|f64|u8|u16|u32|u64)\b'
+      scope: entity.name.tag.quartz
+
+    # Instruction
+    - match: '\b(nop|halt|rnd|rndseed|wait|waiti|time|tick|ramsize|vmx|reset|video|videoinf|print|mov|movi|add|sub|mul|div|mod|and|or|xor|shl|shr|addi|subi|inc|dec|not|cmp|cmpi|jmp|jz|jnz|jg|jl|jge|jle|jmpr|jzr|jnzr|jgr|jlr|jger|jler|callr|call|ret|push|pop|load|store|loadr|storer|memcpy|memset|beep|sound|xframe|xpix|xraw|xclear|xclearc|xgetres|xvsync|xtchar|xtframe|xtgetres|xtclear|xtcurset|xtcurget|xtcurena|ximouse|xikey|xipoll|xitmouse|xitpoll|fsmkdir|fsrmdir|fscreate|fsrm|fsopen|fsclose|fswrite|fsread|fswriteb|fsreadb|fscd|fsdir|fsatt|netatt|netsend|netrecv|netpoll|netmaxpacket)\b'
+      scope: entity.name.namespace.quartz
+
+    # Register
+    - match: '#\w+'
+      scope: entity.name.function.quartz
+
+    # Directive
+    - match: '\%\w+'
+      scope: variable.function.quartz
+
+    # Label
+    - match: \b\w+(?=\:)
+      scope: markup.bold.quartz
+
+  double_quoted_string:
+    - meta_scope: string.quoted.double.quartz
+    - match: '\\.'
+      scope: constant.character.escape.quartz
+    - match: '"'
+      scope: punctuation.definition.string.end.quartz
+      pop: true
+
+  line_comment:
+    - meta_scope: comment.line.quartz
+    - match: $
+      pop: true

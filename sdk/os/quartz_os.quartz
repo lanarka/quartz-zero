@@ -1,0 +1,1720 @@
+/*
+ * ============================================================================
+ *  "Quartz - The Computer"  --  a tiny Windows-3.11-style desktop shell
+ * ============================================================================
+ *
+ *  - Blue desktop (xclearc)
+ *  - Top bar "Quartz - The Computer" with a close ("X") box -> halts the VM
+ *  - If no disk is attached: a modal message box "Disk not attached" / [OK]
+ *    -> clicking OK halts the VM
+ *  - If a disk IS attached: a CD-ROM disk icon top-left. Clicking it opens
+ *    a File Explorer window listing the disk's root directory.
+ *      - folders  -> folder icon, click opens ANOTHER new window for that dir
+ *      - .bin     -> gear icon,  click loads+runs it via `vmx` (entry 0x0)
+ *      - anything else -> plain file icon, not interactive
+ *  - Every explorer window has a title (its directory name) and its own
+ *    close ("X") box, and can be dragged around by its title bar.
+ *  - A "?" box next to the close box opens an About dialog: "Quartz OS 1.0"
+ *    / [OK].
+ *  - The desktop background is a wallpaper image (blitted with `xframe`
+ *    every frame) instead of a flat `xclearc` fill.
+ *
+ *  Build:
+ *      python3 qasm/qasm.py project/os.quartz -o project/os.bin
+ *
+ *  Run (a formatted SVFS disk image is optional):
+ *      ./quartz project/os.bin --ram 8388608 --disk mydisk.img
+ *
+ *  NOTE: needs a generous --ram (>= 8 MiB recommended) - the wallpaper +
+ *  font/icon data segment alone is about 1.3 MiB, plus scratch buffers and
+ *  a large area reserved for loading & running .bin files found on disk.
+ * ============================================================================
+ */
+
+%runtime 255
+%entrypoint start
+%data "sdk/os/quartz_os.data.json"
+
+// ----------------------------------------------------------------------
+// Data segment layout (see os.data.json) - base 0x2000
+// ----------------------------------------------------------------------
+//  font_white    @ 0x002000   95 glyphs (ASCII 32..126), 8x14 RGBA, white ink
+//  font_black    @ 0x00C640   same, black ink
+//  icon_folder   @ 0x016C80   16x16 RGBA
+//  icon_gear     @ 0x017080   16x16 RGBA   (.bin files)
+//  icon_file     @ 0x017480   16x16 RGBA   (generic file)
+//  icon_disk     @ 0x017880   32x32 RGBA   (desktop CD-ROM icon)
+//  wallpaper     @ 0x018880   640x480 RGBA (desktop background)
+//  str_title     @ 0x144880   "Quartz - The Computer"   (21 bytes)
+//  str_diskerr   @ 0x144895   "Disk not attached"       (17 bytes)
+//  str_ok        @ 0x1448A6   "OK"                      (2 bytes)
+//  str_disklabel @ 0x1448A8   "Disk (C:)"               (9 bytes)
+//  str_about     @ 0x1448B1   "Quartz OS 1.0"           (13 bytes)
+//  str_root      @ 0x1448BE   "/\0"                     (2 bytes)
+//
+// Font glyph size: 8x14 px = 448 bytes/glyph. glyph(code) =
+//   atlas_base + (code-32)*448   for 32 <= code <= 126
+//
+// ----------------------------------------------------------------------
+// Runtime (non data-segment) RAM layout - base 0x150000 (well past the end
+// of the data segment at ~0x1448C0)
+// ----------------------------------------------------------------------
+//  CURSOR_BUF          0x150000   640     (10x16 RGBA mouse arrow)
+//  TOPBAR_FILL         0x150280   61440   (640x24 navy)
+//  WIN_TITLEBAR_FILL   0x15F280   31200   (300x26 navy)
+//  WIN_BODY_FILL       0x166C60   232800  (300x194 white)
+//  CLOSEBOX_FILL       0x19F9C0   1296    (18x18 light gray)
+//  MSGBOX_FILL         0x19FED0   114400  (260x110 light gray, reused for
+//                                          both the disk-error and About box)
+//  BUTTON_FILL         0x1BBDB0   7680    (80x24 light gray)
+//  G_* globals         0x1BDBB0.. (4 bytes each; includes G_SHOW_ABOUT,
+//                                  G_DRAG_WIN/OFFX/OFFY for window dragging)
+//  P0..P9,R0,R1        ..         (4 bytes each, "call" args/returns)
+//  SCRATCH_NAME/PATH   ..
+//  WIN_TABLE           0x1BDE68   708 * 4 windows = 2832
+//    window[i] base = 0x1BDE68 + i*708
+//      +0   active  (u32)
+//      +4   x       (u32, pixel)
+//      +8   y       (u32, pixel)
+//      +12  depth   (u32)
+//      +16  path[4] (44 bytes each = 176 bytes)   -> ends at +192
+//      +192 entry_count (u32)
+//      +196 entries[8] (64 bytes each = 512 bytes) -> ends at +708
+//  BIN_LOAD_ADDR       0x1C0000   (buffer for loaded .bin code; size =
+//                                  ramsize - 0x1C0000, computed at runtime)
+// ----------------------------------------------------------------------
+// ============================================================================
+// ENTRY POINT
+// ============================================================================
+start:
+	call init_buffers
+
+	movi u32 #0 0xFFFFFFFF
+	store u32 1825752 #0
+	movi u32 #0 0
+	store u32 1825748 #0
+
+	movi u32 #0 0
+	fsatt #0
+	store u32 1825732 #0
+	cmpi u32 #0 0
+	jz go_no_disk
+
+	// init window table: all inactive
+	movi u32 #1 0
+init_win_loop:
+	cmpi u32 #1 4
+	jge init_win_done
+	mov #2 #1
+	movi u32 #3 708
+	mul u32 #2 #3
+	movi u32 #4 1826408
+	add u32 #4 #2
+	movi u32 #5 0
+	storer u32 #4 #5
+	inc u32 #1
+	jmp init_win_loop
+init_win_done:
+	jmp desktop_loop
+
+go_no_disk:
+	jmp no_disk_loop
+
+// ============================================================================
+// MAIN LOOP: disk attached (desktop + explorer windows)
+// ============================================================================
+desktop_loop:
+	movi u16 #0 0
+	movi u16 #1 0
+	movi u16 #2 640
+	movi u16 #3 480
+	movi u32 #4 100480
+	xframe #0 #1 #2 #3 #4
+
+	call draw_topbar
+	call draw_desktop_icon
+
+	movi u32 #0 0
+draw_win_loop:
+	cmpi u32 #0 4
+	jge draw_win_done
+	store u32 1825740 #0
+	mov #1 #0
+	movi u32 #2 708
+	mul u32 #1 #2
+	movi u32 #3 1826408
+	add u32 #3 #1
+	loadr u32 #4 #3
+	cmpi u32 #4 0
+	jz draw_win_skip
+	store u32 1825764 #3
+	call draw_window
+draw_win_skip:
+	load u32 #0 1825740
+	inc u32 #0
+	jmp draw_win_loop
+draw_win_done:
+
+	load u32 #0 1825748
+	cmpi u32 #0 1
+	jnz desktop_skip_about
+	call draw_about
+desktop_skip_about:
+
+	call poll_input
+	call draw_cursor
+	xvsync 0
+
+	load u32 #0 1825748
+	cmpi u32 #0 1
+	jz desktop_input_about
+	call handle_click_desktop
+	call update_drag
+	jmp desktop_loop
+desktop_input_about:
+	call handle_click_about
+	jmp desktop_loop
+
+// ============================================================================
+// MAIN LOOP: no disk attached (error dialog only)
+// ============================================================================
+no_disk_loop:
+	movi u16 #0 0
+	movi u16 #1 0
+	movi u16 #2 640
+	movi u16 #3 480
+	movi u32 #4 100480
+	xframe #0 #1 #2 #3 #4
+
+	call draw_topbar
+
+	load u32 #0 1825748
+	cmpi u32 #0 1
+	jnz no_disk_show_msgbox
+	call draw_about
+	jmp no_disk_after_box
+no_disk_show_msgbox:
+	call draw_msgbox
+no_disk_after_box:
+
+	call poll_input
+	call draw_cursor
+	xvsync 0
+
+	load u32 #0 1825748
+	cmpi u32 #0 1
+	jz no_disk_input_about
+	call handle_click_nodisk
+	jmp no_disk_loop
+no_disk_input_about:
+	call handle_click_about
+	jmp no_disk_loop
+
+// ============================================================================
+// poll_input: reads mouse, computes click-edge (new left-click this frame)
+// ============================================================================
+poll_input:
+	ximouse #0 #1 #2
+	store u32 1825712 #0
+	store u32 1825716 #1
+	load u32 #3 1825720
+	store u32 1825724 #3
+	store u32 1825720 #2
+	movi u32 #4 1
+	and u32 #2 #4
+	and u32 #3 #4
+	movi u32 #6 0
+	cmp u32 #2 #6
+	jz pi_not_clicked
+	cmp u32 #3 #6
+	jnz pi_not_clicked
+	movi u32 #6 1
+	store u32 1825728 #6
+	ret
+pi_not_clicked:
+	movi u32 #6 0
+	store u32 1825728 #6
+	ret
+
+// ============================================================================
+// draw_cursor: blits the custom arrow sprite at the current mouse position
+// ============================================================================
+draw_cursor:
+	load u32 #0 1825712
+	load u32 #1 1825716
+	movi u16 #2 10
+	movi u16 #3 16
+	movi u32 #4 1376256
+	xframe #0 #1 #2 #3 #4
+	ret
+
+// ============================================================================
+// handle_click_nodisk: only the topbar-X and the OK button react
+// ============================================================================
+handle_click_nodisk:
+	load u32 #0 1825728
+	cmpi u32 #0 0
+	jz hcn_ret
+
+	load u32 #0 1825712
+	load u32 #1 1825716
+
+	// topbar close box: x in [618,636] y in [3,21]
+	cmpi u32 #0 618
+	jl hcn_about_check
+	cmpi u32 #0 636
+	jg hcn_about_check
+	cmpi u32 #1 3
+	jl hcn_about_check
+	cmpi u32 #1 21
+	jg hcn_about_check
+	halt
+
+hcn_about_check:
+	// topbar "?" box: x in [596,614] y in [3,21]
+	cmpi u32 #0 596
+	jl hcn_ok_check
+	cmpi u32 #0 614
+	jg hcn_ok_check
+	cmpi u32 #1 3
+	jl hcn_ok_check
+	cmpi u32 #1 21
+	jg hcn_ok_check
+	movi u32 #2 1
+	store u32 1825748 #2
+	ret
+
+hcn_ok_check:
+	// OK button box: x in [280,360] y in [256,280]
+	cmpi u32 #0 280
+	jl hcn_ret
+	cmpi u32 #0 360
+	jg hcn_ret
+	cmpi u32 #1 256
+	jl hcn_ret
+	cmpi u32 #1 280
+	jg hcn_ret
+	halt
+hcn_ret:
+	ret
+
+// ============================================================================
+// handle_click_desktop
+// ============================================================================
+handle_click_desktop:
+	load u32 #0 1825728
+	cmpi u32 #0 0
+	jz hcd_ret
+
+	load u32 #0 1825712
+	load u32 #1 1825716
+
+	// topbar close box: x in [618,636] y in [3,21] -> halt
+	cmpi u32 #0 618
+	jl hcd_about_check
+	cmpi u32 #0 636
+	jg hcd_about_check
+	cmpi u32 #1 3
+	jl hcd_about_check
+	cmpi u32 #1 21
+	jg hcd_about_check
+	halt
+
+hcd_about_check:
+	// topbar "?" box: x in [596,614] y in [3,21] -> show About box
+	cmpi u32 #0 596
+	jl hcd_check_windows
+	cmpi u32 #0 614
+	jg hcd_check_windows
+	cmpi u32 #1 3
+	jl hcd_check_windows
+	cmpi u32 #1 21
+	jg hcd_check_windows
+	movi u32 #2 1
+	store u32 1825748 #2
+	ret
+
+hcd_check_windows:
+	// reset hit flag before scanning windows (it must not leak a stale
+	// value from a previous frame if no active window claims this click)
+	movi u32 #0 0
+	store u32 1825736 #0
+
+	// check windows topmost-first: slot 3,2,1,0
+	movi u32 #0 3
+hcd_win_loop:
+	cmpi i32 #0 0
+	jl hcd_check_icon
+	store u32 1826052 #0
+	mov #1 #0
+	movi u32 #2 708
+	mul u32 #1 #2
+	movi u32 #3 1826408
+	add u32 #3 #1
+	store u32 1826060 #3
+	loadr u32 #4 #3
+	cmpi u32 #4 0
+	jz hcd_win_next
+	store u32 1825764 #3
+	call handle_click_window
+	load u32 #0 1825736
+	cmpi u32 #0 1
+	jz hcd_ret
+hcd_win_next:
+	load u32 #0 1826052
+	dec i32 #0
+	jmp hcd_win_loop
+
+hcd_check_icon:
+	// desktop disk icon hit box: x in [10,115] y in [35,92]
+	load u32 #0 1825712
+	load u32 #1 1825716
+	cmpi u32 #0 10
+	jl hcd_ret
+	cmpi u32 #0 115
+	jg hcd_ret
+	cmpi u32 #1 35
+	jl hcd_ret
+	cmpi u32 #1 92
+	jg hcd_ret
+	call open_root_window
+hcd_ret:
+	ret
+
+// ----------------------------------------------------------------------
+// handle_click_window (P0=win_base) -> sets G_HIT=1 if the click was
+// inside this window (whether or not it triggered an action), 0 if the
+// click missed this window entirely (so the caller can test lower windows
+// / the desktop underneath).
+// ----------------------------------------------------------------------
+handle_click_window:
+	load u32 #0 1825764
+	store u32 1826060 #0
+
+	mov #1 #0
+	addi u32 #1 4
+	loadr u32 #2 #1
+	store u32 1826088 #2
+	mov #1 #0
+	addi u32 #1 8
+	loadr u32 #2 #1
+	store u32 1826092 #2
+
+	load u32 #0 1825712
+	load u32 #1 1825716
+	load u32 #2 1826088
+	load u32 #3 1826092
+
+	// outside the whole window (300x220)?
+	cmp u32 #0 #2
+	jl hcw_miss
+	mov #4 #2
+	addi u32 #4 300
+	cmp u32 #0 #4
+	jg hcw_miss
+	cmp u32 #1 #3
+	jl hcw_miss
+	mov #4 #3
+	addi u32 #4 220
+	cmp u32 #1 #4
+	jg hcw_miss
+
+	// it's a hit somewhere in this window
+	movi u32 #5 1
+	store u32 1825736 #5
+
+	// close box: relative (278..296, 4..22)
+	mov #4 #2
+	addi u32 #4 278
+	cmp u32 #0 #4
+	jl hcw_check_titlebar
+	mov #4 #2
+	addi u32 #4 296
+	cmp u32 #0 #4
+	jg hcw_check_titlebar
+	mov #4 #3
+	addi u32 #4 4
+	cmp u32 #1 #4
+	jl hcw_check_titlebar
+	mov #4 #3
+	addi u32 #4 22
+	cmp u32 #1 #4
+	jg hcw_check_titlebar
+	// close this window
+	load u32 #0 1826060
+	addi u32 #0 0
+	movi u32 #6 0
+	storer u32 #0 #6
+	ret
+
+hcw_check_titlebar:
+	// title bar strip: relative y in [0,26) (close box already excluded
+	// above) -> start dragging this window from its current mouse offset
+	load u32 #1 1826092
+	mov #4 #1
+	addi u32 #4 26
+	load u32 #0 1825716
+	cmp u32 #0 #4
+	jge hcw_check_rows
+
+	load u32 #0 1825712
+	load u32 #2 1826088
+	sub u32 #0 #2
+	store u32 1825756 #0
+
+	load u32 #1 1825716
+	load u32 #3 1826092
+	sub u32 #1 #3
+	store u32 1825760 #1
+
+	load u32 #4 1826052
+	store u32 1825752 #4
+	ret
+
+hcw_check_rows:
+	// row area starts at rel y=30, row height 22, 8 rows
+	load u32 #1 1826092
+	mov #4 #1
+	addi u32 #4 30
+	load u32 #0 1825716
+	cmp u32 #0 #4
+	jl hcw_ret
+	sub u32 #0 #4          // #0 = y - (winY+30)
+	movi u32 #5 22
+	div u32 #0 #5          // #0 = row index
+	cmpi u32 #0 7
+	jg hcw_ret
+	store u32 1826056 #0
+
+	// also require x within body columns [winX+4, winX+296]
+	load u32 #1 1825712
+	load u32 #2 1826088
+	mov #4 #2
+	addi u32 #4 4
+	cmp u32 #1 #4
+	jl hcw_ret
+	mov #4 #2
+	addi u32 #4 296
+	cmp u32 #1 #4
+	jg hcw_ret
+
+	// check row < entry_count
+	load u32 #0 1826060
+	addi u32 #0 192
+	loadr u32 #1 #0
+	store u32 1826064 #1
+	load u32 #0 1826056
+	load u32 #1 1826064
+	cmp u32 #0 #1
+	jge hcw_ret
+
+	// entry_addr = win_base + WIN_OFF_ENTRIES + row*64
+	load u32 #2 1826060
+	addi u32 #2 196
+	mov #3 #0
+	movi u32 #4 64
+	mul u32 #3 #4
+	add u32 #2 #3
+	store u32 1826068 #2
+
+	// attribute at offset 44
+	mov #3 #2
+	addi u32 #3 44
+	loadr u8 #4 #3
+	store u32 1826072 #4
+	cmpi u32 #4 1
+	jz hcw_open_dir
+
+	// not a dir: check .bin extension
+	load u32 #2 1826068
+	store u32 1825764 #2
+	call name_len
+	load u32 #4 1825804
+	load u32 #2 1826068
+	store u32 1825764 #2
+	store u32 1825768 #4
+	call is_bin_ext
+	load u32 #4 1825804
+	cmpi u32 #4 1
+	jnz hcw_ret
+
+	// execute the .bin
+	load u32 #2 1826060
+	load u32 #3 1826056
+	store u32 1825764 #2
+	store u32 1825768 #3
+	call execute_bin
+	ret
+
+hcw_open_dir:
+	load u32 #2 1826060
+	load u32 #3 1826056
+	store u32 1825764 #2
+	store u32 1825768 #3
+	call open_sub_window
+	ret
+
+hcw_ret:
+	ret
+
+hcw_miss:
+	movi u32 #5 0
+	store u32 1825736 #5
+	ret
+
+// ============================================================================
+// handle_click_about: only the OK button reacts, closing the About box
+// ============================================================================
+handle_click_about:
+	load u32 #0 1825728
+	cmpi u32 #0 0
+	jz hca_ret
+
+	load u32 #0 1825712
+	load u32 #1 1825716
+
+	// OK button box: x in [280,360] y in [256,280]
+	cmpi u32 #0 280
+	jl hca_ret
+	cmpi u32 #0 360
+	jg hca_ret
+	cmpi u32 #1 256
+	jl hca_ret
+	cmpi u32 #1 280
+	jg hca_ret
+
+	movi u32 #2 0
+	store u32 1825748 #2
+hca_ret:
+	ret
+
+// ============================================================================
+// update_drag: called every frame - if a window is currently being dragged
+// (mouse button still held since a click started on its title bar), moves
+// it to follow the mouse; releasing the button ends the drag.
+// ============================================================================
+update_drag:
+	load u32 #0 1825752
+	cmpi u32 #0 0xFFFFFFFF
+	jz upd_ret
+
+	load u32 #1 1825720
+	movi u32 #2 1
+	and u32 #1 #2
+	cmpi u32 #1 0
+	jz upd_stop
+
+	mov #1 #0
+	movi u32 #2 708
+	mul u32 #1 #2
+	movi u32 #3 1826408
+	add u32 #3 #1
+
+	// new_x = max(0, mouseX - offX)  (unsigned sub would wrap otherwise)
+	load u32 #4 1825712
+	load u32 #5 1825756
+	cmp u32 #4 #5
+	jl upd_x_zero
+	sub u32 #4 #5
+	jmp upd_x_store
+upd_x_zero:
+	movi u32 #4 0
+upd_x_store:
+	mov #6 #3
+	addi u32 #6 4
+	storer u32 #6 #4
+
+	// new_y = max(0, mouseY - offY)
+	load u32 #4 1825716
+	load u32 #5 1825760
+	cmp u32 #4 #5
+	jl upd_y_zero
+	sub u32 #4 #5
+	jmp upd_y_store
+upd_y_zero:
+	movi u32 #4 0
+upd_y_store:
+	mov #6 #3
+	addi u32 #6 8
+	storer u32 #6 #4
+	ret
+
+upd_stop:
+	movi u32 #2 0xFFFFFFFF
+	store u32 1825752 #2
+	ret
+
+upd_ret:
+	ret
+
+// ============================================================================
+// fill_rect (P0=addr, P1=w, P2=h, P3=color[u32]) - fills a w*h RGBA buffer
+// in RAM with one solid color (used to pre-build the chrome fill buffers).
+// ============================================================================
+fill_rect:
+	load u32 #0 1825764
+	load u32 #1 1825768
+	load u32 #2 1825772
+	load u32 #3 1825776
+	mul u32 #1 #2
+	store u32 1826012 #1
+	mov #4 #0
+	movi u32 #5 0
+fr_loop:
+	load u32 #6 1826012
+	cmp u32 #5 #6
+	jge fr_done
+	storer u32 #4 #3
+	addi u32 #4 4
+	inc u32 #5
+	jmp fr_loop
+fr_done:
+	ret
+
+// ============================================================================
+// draw_border (P0=x, P1=y, P2=w, P3=h, P4=color) - draws a 1px rectangle
+// outline directly into the pixel framebuffer.
+// ============================================================================
+draw_border:
+	load u32 #0 1825764
+	load u32 #1 1825768
+	load u32 #2 1825772
+	load u32 #3 1825776
+	load u32 #4 1825780
+	store u32 1826024 #0
+	store u32 1826028 #1
+	store u32 1826032 #2
+	store u32 1826036 #3
+	store u32 1826040 #4
+
+	// top & bottom rows
+	movi u32 #5 0
+db_top_loop:
+	load u32 #2 1826032
+	cmp u32 #5 #2
+	jge db_top_done
+	load u32 #0 1826024
+	add u32 #0 #5
+	load u32 #1 1826028
+	load u32 #4 1826040
+	xpix #0 #1 #4
+	load u32 #1 1826028
+	load u32 #3 1826036
+	subi u32 #3 1
+	add u32 #1 #3
+	xpix #0 #1 #4
+	inc u32 #5
+	jmp db_top_loop
+db_top_done:
+
+	movi u32 #5 0
+db_side_loop:
+	load u32 #3 1826036
+	cmp u32 #5 #3
+	jge db_side_done
+	load u32 #0 1826024
+	load u32 #1 1826028
+	add u32 #1 #5
+	load u32 #4 1826040
+	xpix #0 #1 #4
+	load u32 #0 1826024
+	load u32 #2 1826032
+	subi u32 #2 1
+	add u32 #0 #2
+	xpix #0 #1 #4
+	inc u32 #5
+	jmp db_side_loop
+db_side_done:
+	ret
+
+// ============================================================================
+// draw_char (P0=x, P1=y, P2=code, P3=atlas_base) - blits one 8x14 glyph
+// ============================================================================
+draw_char:
+	load u32 #0 1825772
+	cmpi u32 #0 32
+	jl dc_ret
+	cmpi u32 #0 126
+	jg dc_ret
+	subi u32 #0 32
+	movi u32 #1 448
+	mul u32 #0 #1
+	load u32 #2 1825776
+	add u32 #2 #0
+	load u32 #3 1825764
+	load u32 #4 1825768
+	movi u16 #5 8
+	movi u16 #6 14
+	xframe #3 #4 #5 #6 #2
+dc_ret:
+	ret
+
+// ============================================================================
+// draw_text (P0=x, P1=y, P2=str_addr, P3=len, P4=atlas_base)
+// ============================================================================
+draw_text:
+	load u32 #0 1825764
+	store u32 1825812 #0
+	load u32 #0 1825768
+	store u32 1825816 #0
+	load u32 #0 1825772
+	store u32 1825820 #0
+	load u32 #0 1825776
+	store u32 1825824 #0
+	load u32 #0 1825780
+	store u32 1825828 #0
+	movi u32 #0 0
+	store u32 1825832 #0
+dt_loop:
+	load u32 #0 1825832
+	load u32 #1 1825824
+	cmp u32 #0 #1
+	jge dt_done
+
+	load u32 #2 1825820
+	add u32 #2 #0
+	loadr u8 #3 #2
+
+	load u32 #4 1825812
+	mov #5 #0
+	movi u32 #6 8
+	mul u32 #5 #6
+	add u32 #4 #5
+	store u32 1825764 #4
+
+	load u32 #4 1825816
+	store u32 1825768 #4
+	store u32 1825772 #3
+	load u32 #4 1825828
+	store u32 1825776 #4
+	call draw_char
+
+	load u32 #0 1825832
+	inc u32 #0
+	store u32 1825832 #0
+	jmp dt_loop
+dt_done:
+	ret
+
+// ============================================================================
+// init_buffers: builds the mouse cursor sprite + all the flat-color chrome
+// fill buffers, once, at startup.
+// ============================================================================
+init_buffers:
+%include "cursor_fill.quartz"
+
+	// TOPBAR_FILL: 640x24 navy
+	movi u32 #0 1376896
+	store u32 1825764 #0
+	movi u32 #0 640
+	store u32 1825768 #0
+	movi u32 #0 24
+	store u32 1825772 #0
+	movi u32 #0 0xFF800000
+	store u32 1825776 #0
+	call fill_rect
+
+	// WIN_TITLEBAR_FILL: 300x26 navy, slightly transparent so explorer
+	// windows let a bit of the wallpaper show through (alpha 0xE0 instead
+	// of a fully opaque 0xFF)
+	movi u32 #0 1438336
+	store u32 1825764 #0
+	movi u32 #0 300
+	store u32 1825768 #0
+	movi u32 #0 26
+	store u32 1825772 #0
+	movi u32 #0 0xE0800000
+	store u32 1825776 #0
+	call fill_rect
+
+	// WIN_BODY_FILL: 300x194 white, same slight transparency (alpha 0xE0)
+	movi u32 #0 1469536
+	store u32 1825764 #0
+	movi u32 #0 300
+	store u32 1825768 #0
+	movi u32 #0 194
+	store u32 1825772 #0
+	movi u32 #0 0xE0FFFFFF
+	store u32 1825776 #0
+	call fill_rect
+
+	// CLOSEBOX_FILL: 18x18 light gray
+	movi u32 #0 1702336
+	store u32 1825764 #0
+	movi u32 #0 18
+	store u32 1825768 #0
+	movi u32 #0 18
+	store u32 1825772 #0
+	movi u32 #0 0xFFC0C0C0
+	store u32 1825776 #0
+	call fill_rect
+
+	// MSGBOX_FILL: 260x110 light gray
+	movi u32 #0 1703632
+	store u32 1825764 #0
+	movi u32 #0 260
+	store u32 1825768 #0
+	movi u32 #0 110
+	store u32 1825772 #0
+	movi u32 #0 0xFFC0C0C0
+	store u32 1825776 #0
+	call fill_rect
+
+	// BUTTON_FILL: 80x24 light gray
+	movi u32 #0 1818032
+	store u32 1825764 #0
+	movi u32 #0 80
+	store u32 1825768 #0
+	movi u32 #0 24
+	store u32 1825772 #0
+	movi u32 #0 0xFFC0C0C0
+	store u32 1825776 #0
+	call fill_rect
+
+	ret
+
+// ============================================================================
+// draw_topbar
+// ============================================================================
+draw_topbar:
+	movi u16 #0 0
+	movi u16 #1 0
+	movi u16 #2 640
+	movi u16 #3 24
+	movi u32 #4 1376896
+	xframe #0 #1 #2 #3 #4
+
+	movi u32 #0 8
+	store u32 1825764 #0
+	movi u32 #0 5
+	store u32 1825768 #0
+	movi u32 #0 1329280
+	store u32 1825772 #0
+	movi u32 #0 21
+	store u32 1825776 #0
+	movi u32 #0 8192
+	store u32 1825780 #0
+	call draw_text
+
+	movi u16 #0 618
+	movi u16 #1 3
+	movi u16 #2 18
+	movi u16 #3 18
+	movi u32 #4 1702336
+	xframe #0 #1 #2 #3 #4
+
+	movi u32 #0 618
+	store u32 1825764 #0
+	movi u32 #0 3
+	store u32 1825768 #0
+	movi u32 #0 18
+	store u32 1825772 #0
+	movi u32 #0 18
+	store u32 1825776 #0
+	movi u32 #0 0xFF808080
+	store u32 1825780 #0
+	call draw_border
+
+	movi u32 #0 623
+	store u32 1825764 #0
+	movi u32 #0 5
+	store u32 1825768 #0
+	movi u32 #0 88
+	store u32 1825772 #0
+	movi u32 #0 50752
+	store u32 1825776 #0
+	call draw_char
+
+	// "?" (About) box, just to the left of the close box
+	movi u16 #0 596
+	movi u16 #1 3
+	movi u16 #2 18
+	movi u16 #3 18
+	movi u32 #4 1702336
+	xframe #0 #1 #2 #3 #4
+
+	movi u32 #0 596
+	store u32 1825764 #0
+	movi u32 #0 3
+	store u32 1825768 #0
+	movi u32 #0 18
+	store u32 1825772 #0
+	movi u32 #0 18
+	store u32 1825776 #0
+	movi u32 #0 0xFF808080
+	store u32 1825780 #0
+	call draw_border
+
+	movi u32 #0 601
+	store u32 1825764 #0
+	movi u32 #0 5
+	store u32 1825768 #0
+	movi u32 #0 63
+	store u32 1825772 #0
+	movi u32 #0 50752
+	store u32 1825776 #0
+	call draw_char
+	ret
+
+// ============================================================================
+// draw_desktop_icon
+// ============================================================================
+draw_desktop_icon:
+	movi u16 #0 20
+	movi u16 #1 40
+	movi u16 #2 32
+	movi u16 #3 32
+	movi u32 #4 96384
+	xframe #0 #1 #2 #3 #4
+
+	movi u32 #0 20
+	store u32 1825764 #0
+	movi u32 #0 74
+	store u32 1825768 #0
+	movi u32 #0 1329320
+	store u32 1825772 #0
+	movi u32 #0 4
+	store u32 1825776 #0
+	movi u32 #0 8192
+	store u32 1825780 #0
+	call draw_text
+	ret
+
+// ============================================================================
+// draw_msgbox
+// ============================================================================
+draw_msgbox:
+	movi u16 #0 190
+	movi u16 #1 185
+	movi u16 #2 260
+	movi u16 #3 110
+	movi u32 #4 1703632
+	xframe #0 #1 #2 #3 #4
+
+	movi u32 #0 190
+	store u32 1825764 #0
+	movi u32 #0 185
+	store u32 1825768 #0
+	movi u32 #0 260
+	store u32 1825772 #0
+	movi u32 #0 110
+	store u32 1825776 #0
+	movi u32 #0 0xFF808080
+	store u32 1825780 #0
+	call draw_border
+
+	movi u32 #0 252
+	store u32 1825764 #0
+	movi u32 #0 215
+	store u32 1825768 #0
+	movi u32 #0 1329301
+	store u32 1825772 #0
+	movi u32 #0 17
+	store u32 1825776 #0
+	movi u32 #0 50752
+	store u32 1825780 #0
+	call draw_text
+
+	movi u16 #0 280
+	movi u16 #1 256
+	movi u16 #2 80
+	movi u16 #3 24
+	movi u32 #4 1818032
+	xframe #0 #1 #2 #3 #4
+
+	movi u32 #0 280
+	store u32 1825764 #0
+	movi u32 #0 256
+	store u32 1825768 #0
+	movi u32 #0 80
+	store u32 1825772 #0
+	movi u32 #0 24
+	store u32 1825776 #0
+	movi u32 #0 0xFF808080
+	store u32 1825780 #0
+	call draw_border
+
+	movi u32 #0 312
+	store u32 1825764 #0
+	movi u32 #0 261
+	store u32 1825768 #0
+	movi u32 #0 1329318
+	store u32 1825772 #0
+	movi u32 #0 2
+	store u32 1825776 #0
+	movi u32 #0 50752
+	store u32 1825780 #0
+	call draw_text
+	ret
+
+// ============================================================================
+// draw_window (P0 = win_base)
+// ============================================================================
+draw_window:
+	load u32 #0 1825764
+	store u32 1825836 #0
+
+	mov #1 #0
+	addi u32 #1 4
+	loadr u32 #2 #1
+	store u32 1825840 #2
+
+	mov #1 #0
+	addi u32 #1 8
+	loadr u32 #2 #1
+	store u32 1825844 #2
+
+	// title bar fill
+	load u32 #0 1825840
+	load u32 #1 1825844
+	movi u16 #2 300
+	movi u16 #3 26
+	movi u32 #4 1438336
+	xframe #0 #1 #2 #3 #4
+
+	// body fill
+	load u32 #0 1825840
+	load u32 #1 1825844
+	addi u32 #1 26
+	movi u16 #2 300
+	movi u16 #3 194
+	movi u32 #4 1469536
+	xframe #0 #1 #2 #3 #4
+
+	// outer border
+	load u32 #0 1825840
+	store u32 1825764 #0
+	load u32 #0 1825844
+	store u32 1825768 #0
+	movi u32 #0 300
+	store u32 1825772 #0
+	movi u32 #0 220
+	store u32 1825776 #0
+	movi u32 #0 0xFF404040
+	store u32 1825780 #0
+	call draw_border
+
+	// close box
+	load u32 #0 1825840
+	addi u32 #0 278
+	store u32 1825852 #0
+	load u32 #0 1825852
+	load u32 #1 1825844
+	addi u32 #1 4
+	movi u16 #2 18
+	movi u16 #3 18
+	movi u32 #4 1702336
+	xframe #0 #1 #2 #3 #4
+
+	load u32 #0 1825852
+	store u32 1825764 #0
+	load u32 #0 1825844
+	addi u32 #0 4
+	store u32 1825768 #0
+	movi u32 #0 18
+	store u32 1825772 #0
+	movi u32 #0 18
+	store u32 1825776 #0
+	movi u32 #0 0xFF404040
+	store u32 1825780 #0
+	call draw_border
+
+	load u32 #0 1825852
+	addi u32 #0 5
+	store u32 1825764 #0
+	load u32 #0 1825844
+	addi u32 #0 6
+	store u32 1825768 #0
+	movi u32 #0 88
+	store u32 1825772 #0
+	movi u32 #0 50752
+	store u32 1825776 #0
+	call draw_char
+
+	// title text
+	load u32 #0 1825836
+	addi u32 #0 12
+	loadr u32 #1 #0
+	store u32 1825848 #1
+	cmpi u32 #1 0
+	jz dw_title_root
+
+	load u32 #0 1825836
+	addi u32 #0 16
+	load u32 #1 1825848
+	subi u32 #1 1
+	movi u32 #2 44
+	mul u32 #1 #2
+	add u32 #0 #1
+	store u32 1825884 #0
+	store u32 1825764 #0
+	call name_len
+	load u32 #1 1825804
+	cmpi u32 #1 28
+	jle dw_title_lenok
+	movi u32 #1 28
+dw_title_lenok:
+	store u32 1825888 #1
+	jmp dw_title_draw
+
+dw_title_root:
+	movi u32 #0 1329320
+	store u32 1825884 #0
+	movi u32 #0 4
+	store u32 1825888 #0
+
+dw_title_draw:
+	load u32 #0 1825840
+	addi u32 #0 8
+	store u32 1825764 #0
+	load u32 #0 1825844
+	addi u32 #0 6
+	store u32 1825768 #0
+	load u32 #0 1825884
+	store u32 1825772 #0
+	load u32 #0 1825888
+	store u32 1825776 #0
+	movi u32 #0 8192
+	store u32 1825780 #0
+	call draw_text
+
+	// entries
+	load u32 #0 1825836
+	addi u32 #0 192
+	loadr u32 #1 #0
+	store u32 1825856 #1
+
+	movi u32 #0 0
+	store u32 1825852 #0
+dw_row_loop:
+	load u32 #0 1825852
+	load u32 #1 1825856
+	cmp u32 #0 #1
+	jge dw_row_done
+
+	// entry_addr = base + WIN_OFF_ENTRIES + i*64
+	load u32 #2 1825836
+	addi u32 #2 196
+	mov #3 #0
+	movi u32 #4 64
+	mul u32 #3 #4
+	add u32 #2 #3
+	store u32 1825864 #2
+
+	// row top (absolute) = Y + 30 + i*22
+	load u32 #3 1825844
+	addi u32 #3 30
+	mov #4 #0
+	movi u32 #5 22
+	mul u32 #4 #5
+	add u32 #3 #4
+	store u32 1825860 #3
+
+	// attribute
+	mov #4 #2
+	addi u32 #4 44
+	loadr u8 #5 #4
+	store u32 1825868 #5
+
+	cmpi u32 #5 1
+	jz dw_row_icon_folder
+
+	// not a dir -> check .bin
+	load u32 #2 1825864
+	store u32 1825764 #2
+	call name_len
+	load u32 #6 1825804
+	store u32 1825880 #6
+	load u32 #2 1825864
+	store u32 1825764 #2
+	store u32 1825768 #6
+	call is_bin_ext
+	load u32 #6 1825804
+	cmpi u32 #6 1
+	jz dw_row_icon_gear
+
+	movi u32 #0 95360
+	store u32 1825892 #0
+	jmp dw_row_icon_done
+
+dw_row_icon_gear:
+	movi u32 #0 94336
+	store u32 1825892 #0
+	jmp dw_row_icon_done
+
+dw_row_icon_folder:
+	movi u32 #0 93312
+	store u32 1825892 #0
+	load u32 #2 1825864
+	store u32 1825764 #2
+	call name_len
+	load u32 #6 1825804
+	store u32 1825880 #6
+
+dw_row_icon_done:
+	load u32 #0 1825840
+	addi u32 #0 8
+	load u32 #1 1825860
+	addi u32 #1 2
+	movi u16 #2 16
+	movi u16 #3 16
+	load u32 #4 1825892
+	xframe #0 #1 #2 #3 #4
+
+	load u32 #6 1825880
+	cmpi u32 #6 30
+	jle dw_row_namelen_ok
+	movi u32 #6 30
+dw_row_namelen_ok:
+
+	load u32 #0 1825840
+	addi u32 #0 30
+	store u32 1825764 #0
+	load u32 #0 1825860
+	addi u32 #0 4
+	store u32 1825768 #0
+	load u32 #0 1825864
+	store u32 1825772 #0
+	store u32 1825776 #6
+	movi u32 #0 50752
+	store u32 1825780 #0
+	call draw_text
+
+	load u32 #0 1825852
+	inc u32 #0
+	store u32 1825852 #0
+	jmp dw_row_loop
+dw_row_done:
+	ret
+
+// ============================================================================
+// draw_about: "Quartz OS 1.0" / [OK] - reuses the same box+button chrome as
+// draw_msgbox.
+// ============================================================================
+draw_about:
+	movi u16 #0 190
+	movi u16 #1 185
+	movi u16 #2 260
+	movi u16 #3 110
+	movi u32 #4 1703632
+	xframe #0 #1 #2 #3 #4
+
+	movi u32 #0 190
+	store u32 1825764 #0
+	movi u32 #0 185
+	store u32 1825768 #0
+	movi u32 #0 260
+	store u32 1825772 #0
+	movi u32 #0 110
+	store u32 1825776 #0
+	movi u32 #0 0xFF808080
+	store u32 1825780 #0
+	call draw_border
+
+	movi u32 #0 268
+	store u32 1825764 #0
+	movi u32 #0 215
+	store u32 1825768 #0
+	movi u32 #0 1329324
+	store u32 1825772 #0
+	movi u32 #0 13
+	store u32 1825776 #0
+	movi u32 #0 50752
+	store u32 1825780 #0
+	call draw_text
+
+	movi u16 #0 280
+	movi u16 #1 256
+	movi u16 #2 80
+	movi u16 #3 24
+	movi u32 #4 1818032
+	xframe #0 #1 #2 #3 #4
+
+	movi u32 #0 280
+	store u32 1825764 #0
+	movi u32 #0 256
+	store u32 1825768 #0
+	movi u32 #0 80
+	store u32 1825772 #0
+	movi u32 #0 24
+	store u32 1825776 #0
+	movi u32 #0 0xFF808080
+	store u32 1825780 #0
+	call draw_border
+
+	movi u32 #0 312
+	store u32 1825764 #0
+	movi u32 #0 261
+	store u32 1825768 #0
+	movi u32 #0 1329318
+	store u32 1825772 #0
+	movi u32 #0 2
+	store u32 1825776 #0
+	movi u32 #0 50752
+	store u32 1825780 #0
+	call draw_text
+	ret
+
+// ============================================================================
+// name_len (P0=addr) -> R0 = length of NUL-terminated string, capped at 43
+// ============================================================================
+name_len:
+	load u32 #0 1825764
+	movi u32 #1 0
+nl_loop:
+	cmpi u32 #1 43
+	jge nl_done
+	mov #2 #0
+	add u32 #2 #1
+	loadr u8 #3 #2
+	cmpi u32 #3 0
+	jz nl_done
+	inc u32 #1
+	jmp nl_loop
+nl_done:
+	store u32 1825804 #1
+	ret
+
+// ============================================================================
+// is_bin_ext (P0=addr, P1=len) -> R0 = 1 if the name ends in ".bin"
+// ============================================================================
+is_bin_ext:
+	load u32 #0 1825768
+	cmpi u32 #0 4
+	jl ib_no
+	load u32 #1 1825764
+	mov #2 #0
+	subi u32 #2 4
+	add u32 #2 #1
+	loadr u8 #3 #2
+	cmpi u32 #3 46
+	jnz ib_no
+	mov #4 #2
+	addi u32 #4 1
+	loadr u8 #3 #4
+	cmpi u32 #3 98
+	jnz ib_no
+	mov #4 #2
+	addi u32 #4 2
+	loadr u8 #3 #4
+	cmpi u32 #3 105
+	jnz ib_no
+	mov #4 #2
+	addi u32 #4 3
+	loadr u8 #3 #4
+	cmpi u32 #3 110
+	jnz ib_no
+	movi u32 #5 1
+	store u32 1825804 #5
+	ret
+ib_no:
+	movi u32 #5 0
+	store u32 1825804 #5
+	ret
+
+// ============================================================================
+// svfs_goto (P0 = win_base) - navigates SVFS's global current directory to
+// this window's absolute path (cd "/" then cd each stored path component)
+// ============================================================================
+svfs_goto:
+	load u32 #0 1825764
+	store u32 1825900 #0
+
+	movi u32 #1 1329337
+	fscd #1 #2
+
+	load u32 #0 1825900
+	addi u32 #0 12
+	loadr u32 #1 #0
+	store u32 1825904 #1
+
+	movi u32 #2 0
+	store u32 1825908 #2
+sg_loop:
+	load u32 #0 1825908
+	load u32 #1 1825904
+	cmp u32 #0 #1
+	jge sg_done
+
+	load u32 #2 1825900
+	addi u32 #2 16
+	mov #3 #0
+	movi u32 #4 44
+	mul u32 #3 #4
+	add u32 #2 #3
+	fscd #2 #5
+
+	load u32 #0 1825908
+	inc u32 #0
+	store u32 1825908 #0
+	jmp sg_loop
+sg_done:
+	ret
+
+// ============================================================================
+// find_free_slot -> R0 = window-table index 0..3, or 0xFFFFFFFF if full
+// ============================================================================
+find_free_slot:
+	movi u32 #0 0
+fs_loop:
+	cmpi u32 #0 4
+	jge fs_none
+	mov #1 #0
+	movi u32 #2 708
+	mul u32 #1 #2
+	movi u32 #3 1826408
+	add u32 #3 #1
+	loadr u32 #4 #3
+	cmpi u32 #4 0
+	jz fs_found
+	inc u32 #0
+	jmp fs_loop
+fs_found:
+	store u32 1825804 #0
+	ret
+fs_none:
+	movi u32 #5 0xFFFFFFFF
+	store u32 1825804 #5
+	ret
+
+// ============================================================================
+// open_root_window - opens a new explorer window on the disk root "/"
+// ============================================================================
+open_root_window:
+	call find_free_slot
+	load u32 #0 1825804
+	cmpi u32 #0 0xFFFFFFFF
+	jz orw_none
+	store u32 1825948 #0
+
+	mov #1 #0
+	movi u32 #2 708
+	mul u32 #1 #2
+	movi u32 #3 1826408
+	add u32 #3 #1
+	store u32 1825944 #3
+
+	load u32 #0 1825948
+	mov #4 #0
+	movi u32 #5 30
+	mul u32 #4 #5
+	addi u32 #4 60
+	load u32 #3 1825944
+	mov #6 #3
+	addi u32 #6 4
+	storer u32 #6 #4
+
+	load u32 #0 1825948
+	mov #4 #0
+	movi u32 #5 25
+	mul u32 #4 #5
+	addi u32 #4 50
+	load u32 #3 1825944
+	mov #6 #3
+	addi u32 #6 8
+	storer u32 #6 #4
+
+	load u32 #3 1825944
+	mov #6 #3
+	addi u32 #6 12
+	movi u32 #7 0
+	storer u32 #6 #7
+
+	load u32 #3 1825944
+	store u32 1825764 #3
+	call svfs_goto
+
+	load u32 #3 1825944
+	mov #0 #3
+	addi u32 #0 196
+	movi u32 #1 8
+	fsdir #0 #1 #2 #6
+
+	load u32 #3 1825944
+	mov #4 #3
+	addi u32 #4 192
+	storer u32 #4 #2
+
+	load u32 #3 1825944
+	mov #4 #3
+	addi u32 #4 0
+	movi u32 #5 1
+	storer u32 #4 #5
+orw_none:
+	ret
+
+// ============================================================================
+// open_sub_window (P0 = parent_win_base, P1 = entry_index) - opens a new
+// window for the sub-directory named by entries[entry_index] of the parent.
+// ============================================================================
+open_sub_window:
+	load u32 #0 1825764
+	store u32 1825916 #0
+	load u32 #0 1825768
+	store u32 1825920 #0
+
+	call find_free_slot
+	load u32 #0 1825804
+	cmpi u32 #0 0xFFFFFFFF
+	jz osw_none
+	store u32 1825940 #0
+
+	mov #1 #0
+	movi u32 #2 708
+	mul u32 #1 #2
+	movi u32 #3 1826408
+	add u32 #3 #1
+	store u32 1825924 #3
+
+	// parent depth
+	load u32 #0 1825916
+	addi u32 #0 12
+	loadr u32 #1 #0
+	store u32 1825932 #1
+
+	// if parent depth already at max (4), refuse (no room for another level)
+	cmpi u32 #1 4
+	jge osw_none
+
+	// copy parent path[0..pdepth-1] into dst path
+	load u32 #0 1825916
+	addi u32 #0 16
+	load u32 #2 1825924
+	addi u32 #2 16
+	mov #3 #1
+	movi u32 #4 44
+	mul u32 #3 #4
+	memcpy #2 #0 #3
+
+	// copy the chosen entry's name (44 bytes) into dst.path[pdepth]
+	load u32 #0 1825916
+	addi u32 #0 196
+	load u32 #4 1825920
+	mov #5 #4
+	movi u32 #6 64
+	mul u32 #5 #6
+	add u32 #0 #5
+	store u32 1825936 #0
+
+	load u32 #2 1825924
+	addi u32 #2 16
+	load u32 #1 1825932
+	mov #5 #1
+	movi u32 #6 44
+	mul u32 #5 #6
+	add u32 #2 #5
+	load u32 #0 1825936
+	movi u32 #6 44
+	memcpy #2 #0 #6
+
+	// dst.depth = pdepth+1
+	load u32 #1 1825932
+	inc u32 #1
+	load u32 #2 1825924
+	addi u32 #2 12
+	storer u32 #2 #1
+
+	// position based on slot index
+	load u32 #0 1825940
+	mov #4 #0
+	movi u32 #5 30
+	mul u32 #4 #5
+	addi u32 #4 60
+	load u32 #2 1825924
+	mov #6 #2
+	addi u32 #6 4
+	storer u32 #6 #4
+
+	load u32 #0 1825940
+	mov #4 #0
+	movi u32 #5 25
+	mul u32 #4 #5
+	addi u32 #4 50
+	load u32 #2 1825924
+	mov #6 #2
+	addi u32 #6 8
+	storer u32 #6 #4
+
+	// navigate + list
+	load u32 #2 1825924
+	store u32 1825764 #2
+	call svfs_goto
+
+	load u32 #2 1825924
+	mov #0 #2
+	addi u32 #0 196
+	movi u32 #1 8
+	fsdir #0 #1 #3 #6
+
+	load u32 #2 1825924
+	mov #4 #2
+	addi u32 #4 192
+	storer u32 #4 #3
+
+	load u32 #2 1825924
+	mov #4 #2
+	addi u32 #4 0
+	movi u32 #5 1
+	storer u32 #4 #5
+osw_none:
+	ret
+
+// ============================================================================
+// execute_bin (P0 = win_base, P1 = entry_index) - loads and runs a .bin
+// file found in this window's directory, via a "warm restart" (vmx),
+// exactly like loader.quartz, with a hardcoded entrypoint of 0x00000000.
+// ============================================================================
+execute_bin:
+	load u32 #0 1825764
+	store u32 1825952 #0
+	load u32 #0 1825768
+	store u32 1825956 #0
+
+	load u32 #0 1825952
+	store u32 1825764 #0
+	call svfs_goto
+
+	load u32 #0 1825952
+	addi u32 #0 196
+	load u32 #1 1825956
+	mov #2 #1
+	movi u32 #3 64
+	mul u32 #2 #3
+	add u32 #0 #2
+	store u32 1825960 #0
+
+	ramsize #1
+	store u32 1825964 #1
+	movi u32 #2 1835008
+
+	// safety guard: need at least a few KB of room past BIN_LOAD_ADDR for
+	// any real program, otherwise bail out instead of calling vmx with a
+	// zero/garbage length (which would fault the whole VM)
+	mov #3 #2
+	addi u32 #3 4096
+	cmp u32 #1 #3
+	jl ex_ret
+
+	mov #3 #1
+	sub u32 #3 #2
+	store u32 1825968 #3
+
+	load u32 #0 1825960
+	fsopen #0
+	movi u32 #2 1835008
+	load u32 #3 1825968
+	fsreadb #0 #2 #3 #4 #5
+	store u32 1825972 #4
+	fsclose #0
+
+	load u32 #4 1825972
+	cmpi u32 #4 0
+	jz ex_ret
+
+	movi u32 #6 1835008
+	load u32 #7 1825972
+	movi u32 #8 0
+	vmx #6 #7 #8
+ex_ret:
+	ret
+

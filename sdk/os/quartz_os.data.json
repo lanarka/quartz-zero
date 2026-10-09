@@ -1,0 +1,70 @@
+{
+  "start": "0x2000",
+  "blobs": [
+    {
+      "font_white": {
+        "from_file": "sdk/os/assets/font_white_sheet.raw"
+      }
+    },
+    {
+      "font_black": {
+        "from_file": "sdk/os/assets/font_black_sheet.raw"
+      }
+    },
+    {
+      "icon_folder": {
+        "from_file": "sdk/os/assets/icon_folder.raw"
+      }
+    },
+    {
+      "icon_gear": {
+        "from_file": "sdk/os/assets/icon_gear.raw"
+      }
+    },
+    {
+      "icon_file": {
+        "from_file": "sdk/os/assets/icon_file.raw"
+      }
+    },
+    {
+      "icon_disk": {
+        "from_file": "sdk/os/assets/icon_disk.raw"
+      }
+    },
+    {
+      "wallpaper": {
+        "from_file": "sdk/os/assets/wallpaper.raw"
+      }
+    },
+    {
+      "str_title": {
+        "from_string": "Quartz - The Computer"
+      }
+    },
+    {
+      "str_diskerr": {
+        "from_string": "Disk not attached"
+      }
+    },
+    {
+      "str_ok": {
+        "from_string": "OK"
+      }
+    },
+    {
+      "str_disklabel": {
+        "from_string": "Disk"
+      }
+    },
+    {
+      "str_about": {
+        "from_string": "Quartz OS 1.0"
+      }
+    },
+    {
+      "str_root": {
+        "from_string": "/\u0000"
+      }
+    }
+  ]
+}

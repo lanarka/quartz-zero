@@ -1,0 +1,16 @@
+// Store code to RAM
+// nop
+movi u8 #0 0
+store u8 0x000000dd #0
+// nop
+movi u8 #0 0
+store u8 0x000000de #0
+// halt
+movi u8 #0 1
+store u8 0x000000df #0
+	
+// VMX
+movi u32 #0 0x000000dd  // the RAM address where the program code is located
+movi u32 #1 0x00000003  // the length of the code in RAM
+movi u32 #2 0x00000000  // entrypoint
+vmx #0 #1 #2

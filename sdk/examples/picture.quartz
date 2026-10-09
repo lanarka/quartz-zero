@@ -1,0 +1,21 @@
+%data "sdk/examples/picture.data.json"
+// Picture1 150x113 @ 0x00000000
+// Picture2 640x480 @ 0x000108d8
+
+movi u16 #0 0
+movi u16 #1 0
+movi u16 #2 640
+movi u16 #3 480
+movi u32 #4 0x000108d8
+xframe #0 #1 #2 #3 #4 
+
+movi u16 #0 0
+movi u16 #1 0
+movi u16 #2 150
+movi u16 #3 113
+movi u32 #4 0x00000000
+xframe #0 #1 #2 #3 #4 
+
+loop:
+	xvsync 0
+	jmp loop

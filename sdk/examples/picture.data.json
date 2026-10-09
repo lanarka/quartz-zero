@@ -1,0 +1,7 @@
+{
+	"start": "0x00",
+	"blobs": [
+		{"Image1": {"from_file": "picture1.dat"}},
+		{"Image2": {"from_file": "picture2.dat"}}
+	]
+}

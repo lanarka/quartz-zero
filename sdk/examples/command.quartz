@@ -1,0 +1,1871 @@
+// =============================================================================
+// command.quartz - a simple command interpreter ("easy DOS") for an SVFS disk
+//
+// prompt> COMMAND [argument]
+//
+// Supported commands:
+//   DIR              - list the contents of the current directory
+//   MKDIR <name>     - create a subdirectory
+//   RD <name>        - delete an EMPTY subdirectory
+//   CD <name>        - change directory (".." = parent, "/" = root)
+//   DEL <name>       - delete a file
+//   TYPE <name>      - print a text file to the screen
+//   RUN <name>       - loads a raw binary file (no file header, like
+//                      boot.bin) and runs it via "vmx" (warm restart),
+//                      the entrypoint is HARDCODED to 0x00000000
+//   CLS              - clear the screen
+//   HELP             - print this list of commands
+//   EXIT             - stop the VM (halt)
+//
+// Keyboard: the VM reads physical key codes exactly as reported by RAYLIB 5.5
+// (the GetKeyboardKey function / KeyboardKey enum) - "xikey"/"xipoll" return
+// exactly these numbers. Important codes used here:
+//   32          KEY_SPACE
+//   48-57       KEY_ZERO..KEY_NINE   (match ASCII '0'-'9')
+//   65-90       KEY_A..KEY_Z         (match ASCII 'A'-'Z')
+//   256         KEY_ESCAPE
+//   257         KEY_ENTER
+//   258         KEY_TAB
+//   259         KEY_BACKSPACE
+// Raylib reports the PHYSICAL key code (not the character according to the
+// layout). Codes 65-90 (A-Z) are therefore ALWAYS the same "uppercase"
+// physical code regardless of whether an uppercase or lowercase letter is
+// actually typed - the shell takes care of that itself:
+//   - SHIFT (Left/Right) held AT THE SAME TIME as the letter -> UPPERCASE letter
+//   - CAPS LOCK is on (toggled by every press of the physical Caps
+//     Lock key, exactly like on a real keyboard) -> UPPERCASE letter
+//   - Shift + Caps Lock together -> they cancel each other out -> lowercase letter
+//     (exactly like on a real keyboard)
+//   - otherwise (neither) -> lowercase letter
+// xikey reports up to 4 simultaneously held codes at once, so Shift+letter is
+// captured within a single poll (more in the comment near read_line below).
+// Digits/space/punctuation are NOT changed by Shift (the shell doesn't know
+// e.g. Shift+1='!') - this is an intentional simplification, outside the
+// scope of the assignment.
+//
+// NOTE on Caps Lock: the actual hardware Caps Lock key initially behaved
+// UNRELIABLY (via xikey, which was based only on IsKeyDown() in rt_keyboard)
+// - turning it on could be detected, but turning it off could not. The cause
+// was a documented bug in raylib/GLFW: the OS correctly sends the press that
+// turns Caps Lock on, but never sends the corresponding release (Scroll Lock
+// and Num Lock have the same problem) - see
+// https://github.com/raysan5/raylib/issues/4078. This caused
+// IsKeyDown(KEY_CAPS_LOCK) inside runtime.c to remain "true" forever after
+// the first press. FIXED directly in the VM (runtime.c, the rt_keyboard
+// function): instead of relying solely on IsKeyDown(), for these three lock
+// keys a separate event queue GetKeyPressed() is additionally read, which
+// correctly records EVERY physical press (including the one that turns Caps
+// Lock off), and that is used to construct a clean one-shot "press" - exactly
+// what the code below sees. Thanks to this fix, Caps Lock now behaves, from
+// this program's point of view, exactly like an ordinary key (like the
+// previously, temporarily used F1).
+//
+// LIMITATIONS (for simplicity):
+//   - a command accepts at most ONE argument (separated by a single space)
+//   - max. line length of 62 characters, the command name is compared using
+//     only the first 8 bytes (all supported commands are shorter, so this
+//     doesn't matter)
+//   - no wildcards (*, ?)
+//   - no real text scrolling - once the bottom of the screen is reached, the
+//     cursor simply returns to row 0 (overwriting from the top)
+//
+// Register map:
+//   #0-#4   - local/temporary registers (freely usable in each section;
+//             no subroutine except read_line/classify_key/print_char/
+//             print_string uses them, so they survive a
+//             call print_string/print_char).
+//             In read_line, additionally #1 = repeat_timer (countdown for
+//             typematic auto-repeat of a held key - does NOT need to
+//             survive between individual read_line calls, unlike #7/#5/#6).
+//   #5      - caps_on - Caps Lock state (0/1). PERSISTENT across the WHOLE
+//             run (set once at startup, toggled via XOR on every new
+//             press of the physical Caps Lock key).
+//   #6      - caps_prev_held - was Caps Lock physically held last frame?
+//             PERSISTENT (same reason as #7 - edge detection must
+//             survive even across the boundary between read_line calls).
+//   #7      - prev_key - the code of the last processed "primary" key
+//             (primary_key from classify_key). PERSISTENT across the WHOLE
+//             run of the program (set once at startup, NOT on every
+//             read_line call) - otherwise a physically still-held key
+//             (typically ENTER) would be evaluated as "new" after
+//             returning to a new read_line, and the whole line would be
+//             processed multiple times.
+//   #8      - max_rows of the text grid (constant, xtgetres at startup)
+//   #9      - max_cols of the text grid (constant, xtgetres at startup)
+//   #10     - cur_x (current cursor column, persistent)
+//   #11     - cur_y (current cursor row, persistent)
+//   #12     - fg color (constant, white)
+//   #13     - bg color (constant, black)
+//   #14     - parameter/scratch used EXCLUSIVELY in print_char/read_line
+//             (the character to draw)
+//   #15     - parameter/scratch used EXCLUSIVELY in print_string/dir_loop
+//             (the address of the string to print)
+//
+// RAM addresses:
+//   200        - buffer for xikey (8 bytes: up to 4x u16 key code)
+//   250        - "cmdbuf": an 8-byte, zero-filled copy of the command name,
+//                used for comparison as a single u64 number (fast and
+//                without needing a string-comparison subroutine)
+//   300        - the input line (64 bytes, NUL-terminated), the characters
+//                typed by the user are written here; after Enter, the first
+//                space in it is replaced with a zero -> this produces cmd
+//                (at address 300) and arg (at the address after the space)
+//   2000       - buffer for fsdir (20 x 64 bytes)
+//   4000       - buffer for TYPE (reading a text file, 1024 bytes)
+//   8192       - buffer for RUN (raw code of the loaded .bin file;
+//                size = the rest of RAM from this address, obtained via
+//                ramsize - the same trick as in loader.quartz, so RUN
+//                works for a file of any length)
+//   6000..     - string literals (prompt, messages, help text)
+// =============================================================================
+
+
+// --- 0) initialization --------------------------------------------------------
+
+	xtclear
+	xtgetres #8 #9              // #8 = rows, #9 = cols
+
+	movi u32 #12 0xFFFFFFFF     // fg = white, opaque
+	movi u32 #13 0xFF000000     // bg = black, opaque
+	movi u16 #10 0              // cur_x = 0
+	movi u16 #11 0              // cur_y = 0
+
+	movi u8 #0 2                // 2 = thin blinking cursor
+	xtcurena #0
+	movi u32 #7 0                // #7 = prev_key, PERSISTENT across the whole run
+	                              // (must survive even between individual read_line
+	                              // calls, otherwise a held Enter/other key would be
+	                              // evaluated as "new" after returning to read_line)
+	movi u32 #5 0                // #5 = caps_on (Caps Lock state), PERSISTENT
+	movi u32 #6 0                // #6 = caps_prev_held (was Caps Lock physically
+	                              // held last frame), PERSISTENT - for edge
+	                              // detection (the toggle only happens on a PRESS)
+
+
+// --- string literals (written once at startup) ---------------------------
+
+	// "prompt" @ 6000
+	movi u8 #0 '>'
+	store u8 6000 #0
+	movi u8 #0 ' '
+	store u8 6001 #0
+	movi u8 #0 0
+	store u8 6002 #0
+
+	// "banner" @ 6003
+	movi u8 #0 'Q'
+	store u8 6003 #0
+	movi u8 #0 'U'
+	store u8 6004 #0
+	movi u8 #0 'A'
+	store u8 6005 #0
+	movi u8 #0 'R'
+	store u8 6006 #0
+	movi u8 #0 'T'
+	store u8 6007 #0
+	movi u8 #0 'Z'
+	store u8 6008 #0
+	movi u8 #0 ' '
+	store u8 6009 #0
+	movi u8 #0 'S'
+	store u8 6010 #0
+	movi u8 #0 'H'
+	store u8 6011 #0
+	movi u8 #0 'E'
+	store u8 6012 #0
+	movi u8 #0 'L'
+	store u8 6013 #0
+	movi u8 #0 'L'
+	store u8 6014 #0
+	movi u8 #0 ' '
+	store u8 6015 #0
+	movi u8 #0 '1'
+	store u8 6016 #0
+	movi u8 #0 '.'
+	store u8 6017 #0
+	movi u8 #0 '0'
+	store u8 6018 #0
+	movi u8 #0 10
+	store u8 6019 #0
+	movi u8 #0 0
+	store u8 6020 #0
+
+	// "nodisk_warn" @ 6021
+	movi u8 #0 '('
+	store u8 6021 #0
+	movi u8 #0 'd'
+	store u8 6022 #0
+	movi u8 #0 'i'
+	store u8 6023 #0
+	movi u8 #0 's'
+	store u8 6024 #0
+	movi u8 #0 'k'
+	store u8 6025 #0
+	movi u8 #0 ' '
+	store u8 6026 #0
+	movi u8 #0 'n'
+	store u8 6027 #0
+	movi u8 #0 'o'
+	store u8 6028 #0
+	movi u8 #0 't'
+	store u8 6029 #0
+	movi u8 #0 ' '
+	store u8 6030 #0
+	movi u8 #0 'a'
+	store u8 6031 #0
+	movi u8 #0 't'
+	store u8 6032 #0
+	movi u8 #0 't'
+	store u8 6033 #0
+	movi u8 #0 'a'
+	store u8 6034 #0
+	movi u8 #0 'c'
+	store u8 6035 #0
+	movi u8 #0 'h'
+	store u8 6036 #0
+	movi u8 #0 'e'
+	store u8 6037 #0
+	movi u8 #0 'd'
+	store u8 6038 #0
+	movi u8 #0 ')'
+	store u8 6039 #0
+	movi u8 #0 10
+	store u8 6040 #0
+	movi u8 #0 0
+	store u8 6041 #0
+
+	// "nodisk_dir" @ 6042
+	movi u8 #0 'D'
+	store u8 6042 #0
+	movi u8 #0 'i'
+	store u8 6043 #0
+	movi u8 #0 's'
+	store u8 6044 #0
+	movi u8 #0 'k'
+	store u8 6045 #0
+	movi u8 #0 ' '
+	store u8 6046 #0
+	movi u8 #0 'n'
+	store u8 6047 #0
+	movi u8 #0 'o'
+	store u8 6048 #0
+	movi u8 #0 't'
+	store u8 6049 #0
+	movi u8 #0 ' '
+	store u8 6050 #0
+	movi u8 #0 'a'
+	store u8 6051 #0
+	movi u8 #0 't'
+	store u8 6052 #0
+	movi u8 #0 't'
+	store u8 6053 #0
+	movi u8 #0 'a'
+	store u8 6054 #0
+	movi u8 #0 'c'
+	store u8 6055 #0
+	movi u8 #0 'h'
+	store u8 6056 #0
+	movi u8 #0 'e'
+	store u8 6057 #0
+	movi u8 #0 'd'
+	store u8 6058 #0
+	movi u8 #0 10
+	store u8 6059 #0
+	movi u8 #0 0
+	store u8 6060 #0
+
+	// "bad_cmd" @ 6061
+	movi u8 #0 'B'
+	store u8 6061 #0
+	movi u8 #0 'a'
+	store u8 6062 #0
+	movi u8 #0 'd'
+	store u8 6063 #0
+	movi u8 #0 ' '
+	store u8 6064 #0
+	movi u8 #0 'c'
+	store u8 6065 #0
+	movi u8 #0 'o'
+	store u8 6066 #0
+	movi u8 #0 'm'
+	store u8 6067 #0
+	movi u8 #0 'm'
+	store u8 6068 #0
+	movi u8 #0 'a'
+	store u8 6069 #0
+	movi u8 #0 'n'
+	store u8 6070 #0
+	movi u8 #0 'd'
+	store u8 6071 #0
+	movi u8 #0 ' '
+	store u8 6072 #0
+	movi u8 #0 'o'
+	store u8 6073 #0
+	movi u8 #0 'r'
+	store u8 6074 #0
+	movi u8 #0 ' '
+	store u8 6075 #0
+	movi u8 #0 'f'
+	store u8 6076 #0
+	movi u8 #0 'i'
+	store u8 6077 #0
+	movi u8 #0 'l'
+	store u8 6078 #0
+	movi u8 #0 'e'
+	store u8 6079 #0
+	movi u8 #0 ' '
+	store u8 6080 #0
+	movi u8 #0 'n'
+	store u8 6081 #0
+	movi u8 #0 'a'
+	store u8 6082 #0
+	movi u8 #0 'm'
+	store u8 6083 #0
+	movi u8 #0 'e'
+	store u8 6084 #0
+	movi u8 #0 10
+	store u8 6085 #0
+	movi u8 #0 0
+	store u8 6086 #0
+
+	// "cd_fail" @ 6087
+	movi u8 #0 'C'
+	store u8 6087 #0
+	movi u8 #0 'a'
+	store u8 6088 #0
+	movi u8 #0 'n'
+	store u8 6089 #0
+	movi u8 #0 'n'
+	store u8 6090 #0
+	movi u8 #0 'o'
+	store u8 6091 #0
+	movi u8 #0 't'
+	store u8 6092 #0
+	movi u8 #0 ' '
+	store u8 6093 #0
+	movi u8 #0 'f'
+	store u8 6094 #0
+	movi u8 #0 'i'
+	store u8 6095 #0
+	movi u8 #0 'n'
+	store u8 6096 #0
+	movi u8 #0 'd'
+	store u8 6097 #0
+	movi u8 #0 ' '
+	store u8 6098 #0
+	movi u8 #0 'p'
+	store u8 6099 #0
+	movi u8 #0 'a'
+	store u8 6100 #0
+	movi u8 #0 't'
+	store u8 6101 #0
+	movi u8 #0 'h'
+	store u8 6102 #0
+	movi u8 #0 10
+	store u8 6103 #0
+	movi u8 #0 0
+	store u8 6104 #0
+
+	// "file_notfound" @ 6105
+	movi u8 #0 'F'
+	store u8 6105 #0
+	movi u8 #0 'i'
+	store u8 6106 #0
+	movi u8 #0 'l'
+	store u8 6107 #0
+	movi u8 #0 'e'
+	store u8 6108 #0
+	movi u8 #0 ' '
+	store u8 6109 #0
+	movi u8 #0 'n'
+	store u8 6110 #0
+	movi u8 #0 'o'
+	store u8 6111 #0
+	movi u8 #0 't'
+	store u8 6112 #0
+	movi u8 #0 ' '
+	store u8 6113 #0
+	movi u8 #0 'f'
+	store u8 6114 #0
+	movi u8 #0 'o'
+	store u8 6115 #0
+	movi u8 #0 'u'
+	store u8 6116 #0
+	movi u8 #0 'n'
+	store u8 6117 #0
+	movi u8 #0 'd'
+	store u8 6118 #0
+	movi u8 #0 10
+	store u8 6119 #0
+	movi u8 #0 0
+	store u8 6120 #0
+
+	// "run_notfound" @ 6121
+	movi u8 #0 'F'
+	store u8 6121 #0
+	movi u8 #0 'i'
+	store u8 6122 #0
+	movi u8 #0 'l'
+	store u8 6123 #0
+	movi u8 #0 'e'
+	store u8 6124 #0
+	movi u8 #0 ' '
+	store u8 6125 #0
+	movi u8 #0 'n'
+	store u8 6126 #0
+	movi u8 #0 'o'
+	store u8 6127 #0
+	movi u8 #0 't'
+	store u8 6128 #0
+	movi u8 #0 ' '
+	store u8 6129 #0
+	movi u8 #0 'f'
+	store u8 6130 #0
+	movi u8 #0 'o'
+	store u8 6131 #0
+	movi u8 #0 'u'
+	store u8 6132 #0
+	movi u8 #0 'n'
+	store u8 6133 #0
+	movi u8 #0 'd'
+	store u8 6134 #0
+	movi u8 #0 ' '
+	store u8 6135 #0
+	movi u8 #0 'o'
+	store u8 6136 #0
+	movi u8 #0 'r'
+	store u8 6137 #0
+	movi u8 #0 ' '
+	store u8 6138 #0
+	movi u8 #0 'e'
+	store u8 6139 #0
+	movi u8 #0 'm'
+	store u8 6140 #0
+	movi u8 #0 'p'
+	store u8 6141 #0
+	movi u8 #0 't'
+	store u8 6142 #0
+	movi u8 #0 'y'
+	store u8 6143 #0
+	movi u8 #0 10
+	store u8 6144 #0
+	movi u8 #0 0
+	store u8 6145 #0
+
+	// "tag_dir" @ 6146
+	movi u8 #0 ' '
+	store u8 6146 #0
+	movi u8 #0 '<'
+	store u8 6147 #0
+	movi u8 #0 'D'
+	store u8 6148 #0
+	movi u8 #0 'I'
+	store u8 6149 #0
+	movi u8 #0 'R'
+	store u8 6150 #0
+	movi u8 #0 '>'
+	store u8 6151 #0
+	movi u8 #0 10
+	store u8 6152 #0
+	movi u8 #0 0
+	store u8 6153 #0
+
+	// "nl_only" @ 6154
+	movi u8 #0 10
+	store u8 6154 #0
+	movi u8 #0 0
+	store u8 6155 #0
+
+	// "help_text" @ 6156
+	movi u8 #0 'A'
+	store u8 6156 #0
+	movi u8 #0 'v'
+	store u8 6157 #0
+	movi u8 #0 'a'
+	store u8 6158 #0
+	movi u8 #0 'i'
+	store u8 6159 #0
+	movi u8 #0 'l'
+	store u8 6160 #0
+	movi u8 #0 'a'
+	store u8 6161 #0
+	movi u8 #0 'b'
+	store u8 6162 #0
+	movi u8 #0 'l'
+	store u8 6163 #0
+	movi u8 #0 'e'
+	store u8 6164 #0
+	movi u8 #0 ' '
+	store u8 6165 #0
+	movi u8 #0 'c'
+	store u8 6166 #0
+	movi u8 #0 'o'
+	store u8 6167 #0
+	movi u8 #0 'm'
+	store u8 6168 #0
+	movi u8 #0 'm'
+	store u8 6169 #0
+	movi u8 #0 'a'
+	store u8 6170 #0
+	movi u8 #0 'n'
+	store u8 6171 #0
+	movi u8 #0 'd'
+	store u8 6172 #0
+	movi u8 #0 's'
+	store u8 6173 #0
+	movi u8 #0 ':'
+	store u8 6174 #0
+	movi u8 #0 10
+	store u8 6175 #0
+	movi u8 #0 ' '
+	store u8 6176 #0
+	movi u8 #0 ' '
+	store u8 6177 #0
+	movi u8 #0 'D'
+	store u8 6178 #0
+	movi u8 #0 'I'
+	store u8 6179 #0
+	movi u8 #0 'R'
+	store u8 6180 #0
+	movi u8 #0 ' '
+	store u8 6181 #0
+	movi u8 #0 ' '
+	store u8 6182 #0
+	movi u8 #0 ' '
+	store u8 6183 #0
+	movi u8 #0 ' '
+	store u8 6184 #0
+	movi u8 #0 ' '
+	store u8 6185 #0
+	movi u8 #0 ' '
+	store u8 6186 #0
+	movi u8 #0 ' '
+	store u8 6187 #0
+	movi u8 #0 ' '
+	store u8 6188 #0
+	movi u8 #0 ' '
+	store u8 6189 #0
+	movi u8 #0 ' '
+	store u8 6190 #0
+	movi u8 #0 ' '
+	store u8 6191 #0
+	movi u8 #0 ' '
+	store u8 6192 #0
+	movi u8 #0 'l'
+	store u8 6193 #0
+	movi u8 #0 'i'
+	store u8 6194 #0
+	movi u8 #0 's'
+	store u8 6195 #0
+	movi u8 #0 't'
+	store u8 6196 #0
+	movi u8 #0 ' '
+	store u8 6197 #0
+	movi u8 #0 'c'
+	store u8 6198 #0
+	movi u8 #0 'u'
+	store u8 6199 #0
+	movi u8 #0 'r'
+	store u8 6200 #0
+	movi u8 #0 'r'
+	store u8 6201 #0
+	movi u8 #0 'e'
+	store u8 6202 #0
+	movi u8 #0 'n'
+	store u8 6203 #0
+	movi u8 #0 't'
+	store u8 6204 #0
+	movi u8 #0 ' '
+	store u8 6205 #0
+	movi u8 #0 'd'
+	store u8 6206 #0
+	movi u8 #0 'i'
+	store u8 6207 #0
+	movi u8 #0 'r'
+	store u8 6208 #0
+	movi u8 #0 'e'
+	store u8 6209 #0
+	movi u8 #0 'c'
+	store u8 6210 #0
+	movi u8 #0 't'
+	store u8 6211 #0
+	movi u8 #0 'o'
+	store u8 6212 #0
+	movi u8 #0 'r'
+	store u8 6213 #0
+	movi u8 #0 'y'
+	store u8 6214 #0
+	movi u8 #0 10
+	store u8 6215 #0
+	movi u8 #0 ' '
+	store u8 6216 #0
+	movi u8 #0 ' '
+	store u8 6217 #0
+	movi u8 #0 'M'
+	store u8 6218 #0
+	movi u8 #0 'K'
+	store u8 6219 #0
+	movi u8 #0 'D'
+	store u8 6220 #0
+	movi u8 #0 'I'
+	store u8 6221 #0
+	movi u8 #0 'R'
+	store u8 6222 #0
+	movi u8 #0 ' '
+	store u8 6223 #0
+	movi u8 #0 '<'
+	store u8 6224 #0
+	movi u8 #0 'n'
+	store u8 6225 #0
+	movi u8 #0 'a'
+	store u8 6226 #0
+	movi u8 #0 'm'
+	store u8 6227 #0
+	movi u8 #0 'e'
+	store u8 6228 #0
+	movi u8 #0 '>'
+	store u8 6229 #0
+	movi u8 #0 ' '
+	store u8 6230 #0
+	movi u8 #0 ' '
+	store u8 6231 #0
+	movi u8 #0 ' '
+	store u8 6232 #0
+	movi u8 #0 'c'
+	store u8 6233 #0
+	movi u8 #0 'r'
+	store u8 6234 #0
+	movi u8 #0 'e'
+	store u8 6235 #0
+	movi u8 #0 'a'
+	store u8 6236 #0
+	movi u8 #0 't'
+	store u8 6237 #0
+	movi u8 #0 'e'
+	store u8 6238 #0
+	movi u8 #0 ' '
+	store u8 6239 #0
+	movi u8 #0 'a'
+	store u8 6240 #0
+	movi u8 #0 ' '
+	store u8 6241 #0
+	movi u8 #0 's'
+	store u8 6242 #0
+	movi u8 #0 'u'
+	store u8 6243 #0
+	movi u8 #0 'b'
+	store u8 6244 #0
+	movi u8 #0 'd'
+	store u8 6245 #0
+	movi u8 #0 'i'
+	store u8 6246 #0
+	movi u8 #0 'r'
+	store u8 6247 #0
+	movi u8 #0 'e'
+	store u8 6248 #0
+	movi u8 #0 'c'
+	store u8 6249 #0
+	movi u8 #0 't'
+	store u8 6250 #0
+	movi u8 #0 'o'
+	store u8 6251 #0
+	movi u8 #0 'r'
+	store u8 6252 #0
+	movi u8 #0 'y'
+	store u8 6253 #0
+	movi u8 #0 10
+	store u8 6254 #0
+	movi u8 #0 ' '
+	store u8 6255 #0
+	movi u8 #0 ' '
+	store u8 6256 #0
+	movi u8 #0 'R'
+	store u8 6257 #0
+	movi u8 #0 'D'
+	store u8 6258 #0
+	movi u8 #0 ' '
+	store u8 6259 #0
+	movi u8 #0 '<'
+	store u8 6260 #0
+	movi u8 #0 'n'
+	store u8 6261 #0
+	movi u8 #0 'a'
+	store u8 6262 #0
+	movi u8 #0 'm'
+	store u8 6263 #0
+	movi u8 #0 'e'
+	store u8 6264 #0
+	movi u8 #0 '>'
+	store u8 6265 #0
+	movi u8 #0 ' '
+	store u8 6266 #0
+	movi u8 #0 ' '
+	store u8 6267 #0
+	movi u8 #0 ' '
+	store u8 6268 #0
+	movi u8 #0 ' '
+	store u8 6269 #0
+	movi u8 #0 ' '
+	store u8 6270 #0
+	movi u8 #0 ' '
+	store u8 6271 #0
+	movi u8 #0 'r'
+	store u8 6272 #0
+	movi u8 #0 'e'
+	store u8 6273 #0
+	movi u8 #0 'm'
+	store u8 6274 #0
+	movi u8 #0 'o'
+	store u8 6275 #0
+	movi u8 #0 'v'
+	store u8 6276 #0
+	movi u8 #0 'e'
+	store u8 6277 #0
+	movi u8 #0 ' '
+	store u8 6278 #0
+	movi u8 #0 'a'
+	store u8 6279 #0
+	movi u8 #0 'n'
+	store u8 6280 #0
+	movi u8 #0 ' '
+	store u8 6281 #0
+	movi u8 #0 'e'
+	store u8 6282 #0
+	movi u8 #0 'm'
+	store u8 6283 #0
+	movi u8 #0 'p'
+	store u8 6284 #0
+	movi u8 #0 't'
+	store u8 6285 #0
+	movi u8 #0 'y'
+	store u8 6286 #0
+	movi u8 #0 ' '
+	store u8 6287 #0
+	movi u8 #0 's'
+	store u8 6288 #0
+	movi u8 #0 'u'
+	store u8 6289 #0
+	movi u8 #0 'b'
+	store u8 6290 #0
+	movi u8 #0 'd'
+	store u8 6291 #0
+	movi u8 #0 'i'
+	store u8 6292 #0
+	movi u8 #0 'r'
+	store u8 6293 #0
+	movi u8 #0 'e'
+	store u8 6294 #0
+	movi u8 #0 'c'
+	store u8 6295 #0
+	movi u8 #0 't'
+	store u8 6296 #0
+	movi u8 #0 'o'
+	store u8 6297 #0
+	movi u8 #0 'r'
+	store u8 6298 #0
+	movi u8 #0 'y'
+	store u8 6299 #0
+	movi u8 #0 10
+	store u8 6300 #0
+	movi u8 #0 ' '
+	store u8 6301 #0
+	movi u8 #0 ' '
+	store u8 6302 #0
+	movi u8 #0 'C'
+	store u8 6303 #0
+	movi u8 #0 'D'
+	store u8 6304 #0
+	movi u8 #0 ' '
+	store u8 6305 #0
+	movi u8 #0 '<'
+	store u8 6306 #0
+	movi u8 #0 'n'
+	store u8 6307 #0
+	movi u8 #0 'a'
+	store u8 6308 #0
+	movi u8 #0 'm'
+	store u8 6309 #0
+	movi u8 #0 'e'
+	store u8 6310 #0
+	movi u8 #0 '>'
+	store u8 6311 #0
+	movi u8 #0 ' '
+	store u8 6312 #0
+	movi u8 #0 ' '
+	store u8 6313 #0
+	movi u8 #0 ' '
+	store u8 6314 #0
+	movi u8 #0 ' '
+	store u8 6315 #0
+	movi u8 #0 ' '
+	store u8 6316 #0
+	movi u8 #0 ' '
+	store u8 6317 #0
+	movi u8 #0 'c'
+	store u8 6318 #0
+	movi u8 #0 'h'
+	store u8 6319 #0
+	movi u8 #0 'a'
+	store u8 6320 #0
+	movi u8 #0 'n'
+	store u8 6321 #0
+	movi u8 #0 'g'
+	store u8 6322 #0
+	movi u8 #0 'e'
+	store u8 6323 #0
+	movi u8 #0 ' '
+	store u8 6324 #0
+	movi u8 #0 'd'
+	store u8 6325 #0
+	movi u8 #0 'i'
+	store u8 6326 #0
+	movi u8 #0 'r'
+	store u8 6327 #0
+	movi u8 #0 'e'
+	store u8 6328 #0
+	movi u8 #0 'c'
+	store u8 6329 #0
+	movi u8 #0 't'
+	store u8 6330 #0
+	movi u8 #0 'o'
+	store u8 6331 #0
+	movi u8 #0 'r'
+	store u8 6332 #0
+	movi u8 #0 'y'
+	store u8 6333 #0
+	movi u8 #0 ' '
+	store u8 6334 #0
+	movi u8 #0 '('
+	store u8 6335 #0
+	movi u8 #0 '.'
+	store u8 6336 #0
+	movi u8 #0 '.'
+	store u8 6337 #0
+	movi u8 #0 ' '
+	store u8 6338 #0
+	movi u8 #0 'f'
+	store u8 6339 #0
+	movi u8 #0 'o'
+	store u8 6340 #0
+	movi u8 #0 'r'
+	store u8 6341 #0
+	movi u8 #0 ' '
+	store u8 6342 #0
+	movi u8 #0 'p'
+	store u8 6343 #0
+	movi u8 #0 'a'
+	store u8 6344 #0
+	movi u8 #0 'r'
+	store u8 6345 #0
+	movi u8 #0 'e'
+	store u8 6346 #0
+	movi u8 #0 'n'
+	store u8 6347 #0
+	movi u8 #0 't'
+	store u8 6348 #0
+	movi u8 #0 ','
+	store u8 6349 #0
+	movi u8 #0 ' '
+	store u8 6350 #0
+	movi u8 #0 '/'
+	store u8 6351 #0
+	movi u8 #0 ' '
+	store u8 6352 #0
+	movi u8 #0 'f'
+	store u8 6353 #0
+	movi u8 #0 'o'
+	store u8 6354 #0
+	movi u8 #0 'r'
+	store u8 6355 #0
+	movi u8 #0 ' '
+	store u8 6356 #0
+	movi u8 #0 'r'
+	store u8 6357 #0
+	movi u8 #0 'o'
+	store u8 6358 #0
+	movi u8 #0 'o'
+	store u8 6359 #0
+	movi u8 #0 't'
+	store u8 6360 #0
+	movi u8 #0 ')'
+	store u8 6361 #0
+	movi u8 #0 10
+	store u8 6362 #0
+	movi u8 #0 ' '
+	store u8 6363 #0
+	movi u8 #0 ' '
+	store u8 6364 #0
+	movi u8 #0 'D'
+	store u8 6365 #0
+	movi u8 #0 'E'
+	store u8 6366 #0
+	movi u8 #0 'L'
+	store u8 6367 #0
+	movi u8 #0 ' '
+	store u8 6368 #0
+	movi u8 #0 '<'
+	store u8 6369 #0
+	movi u8 #0 'n'
+	store u8 6370 #0
+	movi u8 #0 'a'
+	store u8 6371 #0
+	movi u8 #0 'm'
+	store u8 6372 #0
+	movi u8 #0 'e'
+	store u8 6373 #0
+	movi u8 #0 '>'
+	store u8 6374 #0
+	movi u8 #0 ' '
+	store u8 6375 #0
+	movi u8 #0 ' '
+	store u8 6376 #0
+	movi u8 #0 ' '
+	store u8 6377 #0
+	movi u8 #0 ' '
+	store u8 6378 #0
+	movi u8 #0 ' '
+	store u8 6379 #0
+	movi u8 #0 'd'
+	store u8 6380 #0
+	movi u8 #0 'e'
+	store u8 6381 #0
+	movi u8 #0 'l'
+	store u8 6382 #0
+	movi u8 #0 'e'
+	store u8 6383 #0
+	movi u8 #0 't'
+	store u8 6384 #0
+	movi u8 #0 'e'
+	store u8 6385 #0
+	movi u8 #0 ' '
+	store u8 6386 #0
+	movi u8 #0 'a'
+	store u8 6387 #0
+	movi u8 #0 ' '
+	store u8 6388 #0
+	movi u8 #0 'f'
+	store u8 6389 #0
+	movi u8 #0 'i'
+	store u8 6390 #0
+	movi u8 #0 'l'
+	store u8 6391 #0
+	movi u8 #0 'e'
+	store u8 6392 #0
+	movi u8 #0 10
+	store u8 6393 #0
+	movi u8 #0 ' '
+	store u8 6394 #0
+	movi u8 #0 ' '
+	store u8 6395 #0
+	movi u8 #0 'T'
+	store u8 6396 #0
+	movi u8 #0 'Y'
+	store u8 6397 #0
+	movi u8 #0 'P'
+	store u8 6398 #0
+	movi u8 #0 'E'
+	store u8 6399 #0
+	movi u8 #0 ' '
+	store u8 6400 #0
+	movi u8 #0 '<'
+	store u8 6401 #0
+	movi u8 #0 'n'
+	store u8 6402 #0
+	movi u8 #0 'a'
+	store u8 6403 #0
+	movi u8 #0 'm'
+	store u8 6404 #0
+	movi u8 #0 'e'
+	store u8 6405 #0
+	movi u8 #0 '>'
+	store u8 6406 #0
+	movi u8 #0 ' '
+	store u8 6407 #0
+	movi u8 #0 ' '
+	store u8 6408 #0
+	movi u8 #0 ' '
+	store u8 6409 #0
+	movi u8 #0 ' '
+	store u8 6410 #0
+	movi u8 #0 's'
+	store u8 6411 #0
+	movi u8 #0 'h'
+	store u8 6412 #0
+	movi u8 #0 'o'
+	store u8 6413 #0
+	movi u8 #0 'w'
+	store u8 6414 #0
+	movi u8 #0 ' '
+	store u8 6415 #0
+	movi u8 #0 'a'
+	store u8 6416 #0
+	movi u8 #0 ' '
+	store u8 6417 #0
+	movi u8 #0 't'
+	store u8 6418 #0
+	movi u8 #0 'e'
+	store u8 6419 #0
+	movi u8 #0 'x'
+	store u8 6420 #0
+	movi u8 #0 't'
+	store u8 6421 #0
+	movi u8 #0 ' '
+	store u8 6422 #0
+	movi u8 #0 'f'
+	store u8 6423 #0
+	movi u8 #0 'i'
+	store u8 6424 #0
+	movi u8 #0 'l'
+	store u8 6425 #0
+	movi u8 #0 'e'
+	store u8 6426 #0
+	movi u8 #0 10
+	store u8 6427 #0
+	movi u8 #0 ' '
+	store u8 6428 #0
+	movi u8 #0 ' '
+	store u8 6429 #0
+	movi u8 #0 'R'
+	store u8 6430 #0
+	movi u8 #0 'U'
+	store u8 6431 #0
+	movi u8 #0 'N'
+	store u8 6432 #0
+	movi u8 #0 ' '
+	store u8 6433 #0
+	movi u8 #0 '<'
+	store u8 6434 #0
+	movi u8 #0 'n'
+	store u8 6435 #0
+	movi u8 #0 'a'
+	store u8 6436 #0
+	movi u8 #0 'm'
+	store u8 6437 #0
+	movi u8 #0 'e'
+	store u8 6438 #0
+	movi u8 #0 '>'
+	store u8 6439 #0
+	movi u8 #0 ' '
+	store u8 6440 #0
+	movi u8 #0 ' '
+	store u8 6441 #0
+	movi u8 #0 ' '
+	store u8 6442 #0
+	movi u8 #0 ' '
+	store u8 6443 #0
+	movi u8 #0 ' '
+	store u8 6444 #0
+	movi u8 #0 'l'
+	store u8 6445 #0
+	movi u8 #0 'o'
+	store u8 6446 #0
+	movi u8 #0 'a'
+	store u8 6447 #0
+	movi u8 #0 'd'
+	store u8 6448 #0
+	movi u8 #0 ' '
+	store u8 6449 #0
+	movi u8 #0 'a'
+	store u8 6450 #0
+	movi u8 #0 ' '
+	store u8 6451 #0
+	movi u8 #0 'r'
+	store u8 6452 #0
+	movi u8 #0 'a'
+	store u8 6453 #0
+	movi u8 #0 'w'
+	store u8 6454 #0
+	movi u8 #0 ' '
+	store u8 6455 #0
+	movi u8 #0 'b'
+	store u8 6456 #0
+	movi u8 #0 'i'
+	store u8 6457 #0
+	movi u8 #0 'n'
+	store u8 6458 #0
+	movi u8 #0 'a'
+	store u8 6459 #0
+	movi u8 #0 'r'
+	store u8 6460 #0
+	movi u8 #0 'y'
+	store u8 6461 #0
+	movi u8 #0 ' '
+	store u8 6462 #0
+	movi u8 #0 'a'
+	store u8 6463 #0
+	movi u8 #0 'n'
+	store u8 6464 #0
+	movi u8 #0 'd'
+	store u8 6465 #0
+	movi u8 #0 ' '
+	store u8 6466 #0
+	movi u8 #0 'e'
+	store u8 6467 #0
+	movi u8 #0 'x'
+	store u8 6468 #0
+	movi u8 #0 'e'
+	store u8 6469 #0
+	movi u8 #0 'c'
+	store u8 6470 #0
+	movi u8 #0 'u'
+	store u8 6471 #0
+	movi u8 #0 't'
+	store u8 6472 #0
+	movi u8 #0 'e'
+	store u8 6473 #0
+	movi u8 #0 ' '
+	store u8 6474 #0
+	movi u8 #0 'i'
+	store u8 6475 #0
+	movi u8 #0 't'
+	store u8 6476 #0
+	movi u8 #0 ' '
+	store u8 6477 #0
+	movi u8 #0 '('
+	store u8 6478 #0
+	movi u8 #0 'e'
+	store u8 6479 #0
+	movi u8 #0 'n'
+	store u8 6480 #0
+	movi u8 #0 't'
+	store u8 6481 #0
+	movi u8 #0 'r'
+	store u8 6482 #0
+	movi u8 #0 'y'
+	store u8 6483 #0
+	movi u8 #0 'p'
+	store u8 6484 #0
+	movi u8 #0 'o'
+	store u8 6485 #0
+	movi u8 #0 'i'
+	store u8 6486 #0
+	movi u8 #0 'n'
+	store u8 6487 #0
+	movi u8 #0 't'
+	store u8 6488 #0
+	movi u8 #0 ' '
+	store u8 6489 #0
+	movi u8 #0 '0'
+	store u8 6490 #0
+	movi u8 #0 ')'
+	store u8 6491 #0
+	movi u8 #0 10
+	store u8 6492 #0
+	movi u8 #0 ' '
+	store u8 6493 #0
+	movi u8 #0 ' '
+	store u8 6494 #0
+	movi u8 #0 'C'
+	store u8 6495 #0
+	movi u8 #0 'L'
+	store u8 6496 #0
+	movi u8 #0 'S'
+	store u8 6497 #0
+	movi u8 #0 ' '
+	store u8 6498 #0
+	movi u8 #0 ' '
+	store u8 6499 #0
+	movi u8 #0 ' '
+	store u8 6500 #0
+	movi u8 #0 ' '
+	store u8 6501 #0
+	movi u8 #0 ' '
+	store u8 6502 #0
+	movi u8 #0 ' '
+	store u8 6503 #0
+	movi u8 #0 ' '
+	store u8 6504 #0
+	movi u8 #0 ' '
+	store u8 6505 #0
+	movi u8 #0 ' '
+	store u8 6506 #0
+	movi u8 #0 ' '
+	store u8 6507 #0
+	movi u8 #0 ' '
+	store u8 6508 #0
+	movi u8 #0 ' '
+	store u8 6509 #0
+	movi u8 #0 'c'
+	store u8 6510 #0
+	movi u8 #0 'l'
+	store u8 6511 #0
+	movi u8 #0 'e'
+	store u8 6512 #0
+	movi u8 #0 'a'
+	store u8 6513 #0
+	movi u8 #0 'r'
+	store u8 6514 #0
+	movi u8 #0 ' '
+	store u8 6515 #0
+	movi u8 #0 't'
+	store u8 6516 #0
+	movi u8 #0 'h'
+	store u8 6517 #0
+	movi u8 #0 'e'
+	store u8 6518 #0
+	movi u8 #0 ' '
+	store u8 6519 #0
+	movi u8 #0 's'
+	store u8 6520 #0
+	movi u8 #0 'c'
+	store u8 6521 #0
+	movi u8 #0 'r'
+	store u8 6522 #0
+	movi u8 #0 'e'
+	store u8 6523 #0
+	movi u8 #0 'e'
+	store u8 6524 #0
+	movi u8 #0 'n'
+	store u8 6525 #0
+	movi u8 #0 10
+	store u8 6526 #0
+	movi u8 #0 ' '
+	store u8 6527 #0
+	movi u8 #0 ' '
+	store u8 6528 #0
+	movi u8 #0 'H'
+	store u8 6529 #0
+	movi u8 #0 'E'
+	store u8 6530 #0
+	movi u8 #0 'L'
+	store u8 6531 #0
+	movi u8 #0 'P'
+	store u8 6532 #0
+	movi u8 #0 ' '
+	store u8 6533 #0
+	movi u8 #0 ' '
+	store u8 6534 #0
+	movi u8 #0 ' '
+	store u8 6535 #0
+	movi u8 #0 ' '
+	store u8 6536 #0
+	movi u8 #0 ' '
+	store u8 6537 #0
+	movi u8 #0 ' '
+	store u8 6538 #0
+	movi u8 #0 ' '
+	store u8 6539 #0
+	movi u8 #0 ' '
+	store u8 6540 #0
+	movi u8 #0 ' '
+	store u8 6541 #0
+	movi u8 #0 ' '
+	store u8 6542 #0
+	movi u8 #0 ' '
+	store u8 6543 #0
+	movi u8 #0 's'
+	store u8 6544 #0
+	movi u8 #0 'h'
+	store u8 6545 #0
+	movi u8 #0 'o'
+	store u8 6546 #0
+	movi u8 #0 'w'
+	store u8 6547 #0
+	movi u8 #0 ' '
+	store u8 6548 #0
+	movi u8 #0 't'
+	store u8 6549 #0
+	movi u8 #0 'h'
+	store u8 6550 #0
+	movi u8 #0 'i'
+	store u8 6551 #0
+	movi u8 #0 's'
+	store u8 6552 #0
+	movi u8 #0 ' '
+	store u8 6553 #0
+	movi u8 #0 't'
+	store u8 6554 #0
+	movi u8 #0 'e'
+	store u8 6555 #0
+	movi u8 #0 'x'
+	store u8 6556 #0
+	movi u8 #0 't'
+	store u8 6557 #0
+	movi u8 #0 10
+	store u8 6558 #0
+	movi u8 #0 ' '
+	store u8 6559 #0
+	movi u8 #0 ' '
+	store u8 6560 #0
+	movi u8 #0 'E'
+	store u8 6561 #0
+	movi u8 #0 'X'
+	store u8 6562 #0
+	movi u8 #0 'I'
+	store u8 6563 #0
+	movi u8 #0 'T'
+	store u8 6564 #0
+	movi u8 #0 ' '
+	store u8 6565 #0
+	movi u8 #0 ' '
+	store u8 6566 #0
+	movi u8 #0 ' '
+	store u8 6567 #0
+	movi u8 #0 ' '
+	store u8 6568 #0
+	movi u8 #0 ' '
+	store u8 6569 #0
+	movi u8 #0 ' '
+	store u8 6570 #0
+	movi u8 #0 ' '
+	store u8 6571 #0
+	movi u8 #0 ' '
+	store u8 6572 #0
+	movi u8 #0 ' '
+	store u8 6573 #0
+	movi u8 #0 ' '
+	store u8 6574 #0
+	movi u8 #0 ' '
+	store u8 6575 #0
+	movi u8 #0 'h'
+	store u8 6576 #0
+	movi u8 #0 'a'
+	store u8 6577 #0
+	movi u8 #0 'l'
+	store u8 6578 #0
+	movi u8 #0 't'
+	store u8 6579 #0
+	movi u8 #0 ' '
+	store u8 6580 #0
+	movi u8 #0 't'
+	store u8 6581 #0
+	movi u8 #0 'h'
+	store u8 6582 #0
+	movi u8 #0 'e'
+	store u8 6583 #0
+	movi u8 #0 ' '
+	store u8 6584 #0
+	movi u8 #0 'V'
+	store u8 6585 #0
+	movi u8 #0 'M'
+	store u8 6586 #0
+	movi u8 #0 10
+	store u8 6587 #0
+	movi u8 #0 0
+	store u8 6588 #0
+
+
+// --- banner + disk check -------------------------------------------------
+
+	movi u32 #15 6003
+	call print_string
+
+	fsatt #0
+	cmpi u32 #0 0
+	jnz main_loop
+	movi u32 #15 6021
+	call print_string
+
+
+// =============================================================================
+// main_loop - print the prompt, read a line, parse it and run the command
+// =============================================================================
+
+main_loop:
+	movi u32 #15 6000
+	call print_string
+	call read_line
+	xtcurset #10 #11
+
+	// --- find the first space in the line, split into cmd (addr. 300) and arg -------
+	movi u32 #2 300
+find_space_loop:
+	loadr u8 #3 #2
+	cmpi u8 #3 0
+	jz split_no_space
+	cmpi u8 #3 32
+	jz split_found_space
+	inc u32 #2
+	jmp find_space_loop
+split_found_space:
+	movi u8 #3 0
+	storer u8 #2 #3
+	mov #1 #2
+	inc u32 #1                  // #1 = arg_addr (character after the space)
+	jmp split_done
+split_no_space:
+	mov #1 #2                   // no argument -> #1 = address of the trailing NUL
+split_done:
+
+	// --- build an 8-byte, zero-filled "cmdbuf" for comparison ----------
+	// (#5,#6 are now permanently reserved for caps_on/caps_prev_held, so here
+	// we only use #0,#2,#4 - #1 must stay untouched, it holds arg_addr)
+	movi u32 #0 250
+	movi u32 #2 0
+	movi u32 #4 8
+	memset #0 #2 #4
+
+	load u8 #3 300
+	cmpi u8 #3 0
+	jz cmdbuf_done
+	store u8 250 #3
+	load u8 #3 301
+	cmpi u8 #3 0
+	jz cmdbuf_done
+	store u8 251 #3
+	load u8 #3 302
+	cmpi u8 #3 0
+	jz cmdbuf_done
+	store u8 252 #3
+	load u8 #3 303
+	cmpi u8 #3 0
+	jz cmdbuf_done
+	store u8 253 #3
+	load u8 #3 304
+	cmpi u8 #3 0
+	jz cmdbuf_done
+	store u8 254 #3
+	load u8 #3 305
+	cmpi u8 #3 0
+	jz cmdbuf_done
+	store u8 255 #3
+	load u8 #3 306
+	cmpi u8 #3 0
+	jz cmdbuf_done
+	store u8 256 #3
+	load u8 #3 307
+	cmpi u8 #3 0
+	jz cmdbuf_done
+	store u8 257 #3
+cmdbuf_done:
+
+	// --- compare the whole 8-byte "cmdbuf" at once as a single u64 number ---
+	load u64 #0 250
+
+	cmpi u64 #0 0
+	jz do_empty
+	cmpi u64 #0 0x726964
+	jz do_dir
+	cmpi u64 #0 0x7269646B6D
+	jz do_mkdir
+	cmpi u64 #0 0x6472
+	jz do_rd
+	cmpi u64 #0 0x6463
+	jz do_cd
+	cmpi u64 #0 0x6C6564
+	jz do_del
+	cmpi u64 #0 0x65707974
+	jz do_type
+	cmpi u64 #0 0x6E7572
+	jz do_run
+	cmpi u64 #0 0x736C63
+	jz do_cls
+	cmpi u64 #0 0x706C6568
+	jz do_help
+	cmpi u64 #0 0x74697865
+	jz do_exit
+	jmp do_unknown
+
+
+// --- DIR ---------------------------------------------------------------------
+// (#5,#6 are permanently reserved for caps_on/caps_prev_held - so this
+// section only uses #0-#4; #1 (arg_addr) is free here, DIR has no argument)
+do_dir:
+	movi u32 #0 2000             // buf_addr
+	movi u32 #1 20                // max_entries
+	fsdir #0 #1 #2 #3             // #2=dst_count, #3=status
+	cmpi u32 #3 0
+	jz dir_nodisk
+	movi u32 #4 0                 // entry index
+dir_loop:
+	cmp u32 #4 #2
+	jge dir_done
+	mov #1 #4
+	movi u32 #0 64
+	mul u32 #1 #0
+	addi u32 #1 2000              // #1 = address of the current record
+	mov #15 #1
+	call print_string             // print the name (offset 0..43 in the record)
+	mov #0 #1
+	addi u32 #0 44                // attribute offset
+	loadr u8 #3 #0                // #3 = attribute (status no longer needed)
+	cmpi u8 #3 1
+	jnz dir_file
+	movi u32 #15 6146
+	call print_string
+	jmp dir_next
+dir_file:
+	movi u32 #15 6154
+	call print_string
+dir_next:
+	inc u32 #4
+	jmp dir_loop
+dir_nodisk:
+	movi u32 #15 6042
+	call print_string
+dir_done:
+	jmp main_loop
+
+
+// --- MKDIR <name> --------------------------------------------------------------
+do_mkdir:
+	fsmkdir #1
+	jmp main_loop
+
+
+// --- RD <name> (rmdir, non-recursive) --------------------------------------------
+do_rd:
+	movi u32 #0 0
+	fsrmdir #1 #0
+	jmp main_loop
+
+
+// --- CD <name> -------------------------------------------------------------
+do_cd:
+	fscd #1 #2
+	cmpi u32 #2 0
+	jnz main_loop
+	movi u32 #15 6087
+	call print_string
+	jmp main_loop
+
+
+// --- DEL <name> --------------------------------------------------------------
+do_del:
+	fsrm #1
+	jmp main_loop
+
+
+// --- TYPE <name> ---------------------------------------------------------------
+do_type:
+	fsopen #1
+	movi u32 #2 4000
+	movi u32 #3 1024
+	fsread #1 #2 #3 #4 #0        // buf=#2, buf_size=#3, dst_len=#4, status=#0
+	fsclose #1
+	cmpi u32 #0 0
+	jz type_fail
+	mov #15 #2
+	call print_string
+	movi u16 #14 10
+	call print_char
+	jmp main_loop
+type_fail:
+	movi u32 #15 6105
+	call print_string
+	jmp main_loop
+
+
+// --- RUN <name> - loads a raw binary file and runs it via vmx -----------
+// the entrypoint is hardcoded to 0x00000000 (as the user explicitly wanted)
+do_run:
+	loadr u8 #2 #1
+	cmpi u8 #2 0
+	jz run_fail                  // no argument
+	fsopen #1
+	ramsize #0
+	movi u32 #2 8192              // code_addr - where the file contents are loaded
+	mov #3 #0
+	sub u32 #3 #2                 // buf_size = ramsize - code_addr
+	fsreadb #1 #2 #3 #4 #0        // #4 = dst_len, status -> #0 (ramsize no longer needed)
+	fsclose #1
+	cmpi u32 #4 0
+	jz run_fail
+	movi u32 #0 0                 // entrypoint = 0x00000000 (hardcoded)
+	vmx #2 #4 #0                  // if it succeeds, control never returns here
+run_fail:
+	movi u32 #15 6121
+	call print_string
+	jmp main_loop
+
+
+// --- CLS -----------------------------------------------------------------------
+do_cls:
+	xtclear
+	movi u16 #10 0
+	movi u16 #11 0
+	jmp main_loop
+
+
+// --- HELP ------------------------------------------------------------------
+do_help:
+	movi u32 #15 6156
+	call print_string
+	jmp main_loop
+
+
+// --- EXIT --------------------------------------------------------------------
+do_exit:
+	halt
+
+
+// --- empty line (Enter with no command) -> just show the prompt again -----------------
+do_empty:
+	jmp main_loop
+
+
+// --- unknown commands ---------------------------------------------------------
+do_unknown:
+	movi u32 #15 6061
+	call print_string
+	jmp main_loop
+
+
+// =============================================================================
+// print_char - draws one character and advances the cursor (#10,#11)
+//   input:  #14 = character code point (10 = newline)
+//   uses only #10,#11 (persistent) and #12,#13 (colors, read-only)
+// =============================================================================
+print_char:
+	cmpi u16 #14 10
+	jz pc_newline
+
+	xtchar #10 #11 #14 #12 #13
+	inc u16 #10
+	cmp u16 #10 #9
+	jl pc_check_row
+	movi u16 #10 0
+	inc u16 #11
+	jmp pc_check_row
+
+pc_newline:
+	movi u16 #10 0
+	inc u16 #11
+
+pc_check_row:
+	cmp u16 #11 #8
+	jl pc_done
+	movi u16 #11 0               // no real scrolling - wrap to the top
+
+pc_done:
+	xtcurset #10 #11
+	ret
+
+
+// =============================================================================
+// print_string - prints a NUL-terminated string
+//   input:  #15 = address of the string (modified during execution - treat as scratch)
+//   uses #14 (via print_char) and #15
+// =============================================================================
+print_string:
+	loadr u8 #14 #15
+	cmpi u8 #14 0
+	jz ps_done
+	call print_char
+	inc u32 #15
+	jmp print_string
+ps_done:
+	ret
+
+
+// =============================================================================
+// classify_key - evaluates one physical key code (RAYLIB 5.5) while
+// scanning all 4 slots from xikey.
+//   input:  #4 = key code (one of the 4 slots read by the caller)
+//   output: #2 = shift_flag - set to 1 if it was KEY_LEFT/RIGHT_SHIFT
+//           #3 = primary_key - set to #4, IF it hasn't been set yet
+//                (i.e. #3==0) and #4 is not a modifier (shift/ctrl/alt/super/
+//                capslock/menu) nor 0
+//   the caller must zero #2 and #3 BEFORE the first call (they accumulate
+//   across multiple calls - 4x, once for each slot)
+// =============================================================================
+classify_key:
+	cmpi u32 #4 340               // KEY_LEFT_SHIFT
+	jz ck_shift
+	cmpi u32 #4 344               // KEY_RIGHT_SHIFT
+	jz ck_shift
+	cmpi u32 #4 0
+	jz ck_done
+	cmpi u32 #4 280               // KEY_CAPS_LOCK - handled separately
+	jz ck_done
+	cmpi u32 #4 341               // KEY_LEFT_CONTROL
+	jz ck_done
+	cmpi u32 #4 342               // KEY_LEFT_ALT
+	jz ck_done
+	cmpi u32 #4 343               // KEY_LEFT_SUPER
+	jz ck_done
+	cmpi u32 #4 345               // KEY_RIGHT_CONTROL
+	jz ck_done
+	cmpi u32 #4 346               // KEY_RIGHT_ALT
+	jz ck_done
+	cmpi u32 #4 347               // KEY_RIGHT_SUPER
+	jz ck_done
+	cmpi u32 #4 348               // KEY_KB_MENU
+	jz ck_done
+	cmpi u32 #3 0
+	jnz ck_done                    // primary_key was already found in an earlier slot
+	mov #3 #4
+	jmp ck_done
+ck_shift:
+	movi u32 #2 1
+ck_done:
+	ret
+
+
+// =============================================================================
+// read_line - reads one line from the keyboard into RAM at address 300
+// (max 62 characters + NUL), with echo to the screen, BACKSPACE, typematic
+// auto-repeat, and SHIFT / CAPS LOCK support (upper/lowercase letters).
+//
+// Key codes are physical codes according to RAYLIB 5.5 - xikey reports up to
+// 4 SIMULTANEOUSLY held codes at once (not just one), so e.g. Shift+D brings,
+// within a single poll, both 340 (shift) and 68 ('d') in two different
+// slots. So every frame all 4 slots (RAM 200,202,204,206) are scanned:
+//   - Phase A: looks for KEY_CAPS_LOCK(280) - an edge (0->1) toggles caps_on (#5)
+//   - Phase B: classify_key determines shift_flag (#2) and "primary_key" (#3)
+//             - the first non-trivial, non-modifier code found
+// The resulting letter (65-90) is printed UPPERCASE if (shift XOR caps_on)==1,
+// otherwise lowercase (+32). Digits/space/punctuation are unchanged (Shift has
+// no effect on them - shifted symbols like '!' for Shift+1 are not known by
+// this shell).
+//
+//   uses #0-#4(scratch/local), #5/#6(caps_on/caps_prev_held - permanently
+//   reserved), #7(prev_key), #14(via print_char), #15(via print_string)
+// =============================================================================
+read_line:
+	movi u32 #0 300
+	movi u32 #1 0
+	movi u32 #2 64
+	memset #0 #1 #2
+
+	movi u32 #0 0                // #0 = current line length
+	// NOTE: #7 (prev_key) is DELIBERATELY not reset HERE - it is a persistent
+	// register set once when the program starts. If it were reset on every
+	// read_line call, then e.g. Enter (or any other key) which is still
+	// physically held down even in the first frame of a new read_line would
+	// be evaluated again as a "new" key press - and the whole line
+	// (including an empty Enter) would be processed multiple times in a row
+	// until the user actually releases the key. #5/#6 (caps) are for the
+	// same reason also persistent and are reset only once, at program startup.
+
+rl_loop:
+	xvsync 0
+
+	movi u32 #2 200
+	xikey #3 #2                    // fills RAM 200-207 with the current keyboard
+	                                // state (we don't need the count in #3 here,
+	                                // it will be overwritten right away by Phase A)
+
+	// --- Phase A: Caps Lock - an edge 0->1 toggles caps_on (#5) -----------------
+	// The Caps Lock key now (after the fix in the VM - rt_keyboard in
+	// runtime.c) reports via xikey code 280 as a CLEAN one-shot "pressed"
+	// pulse for exactly one frame on EVERY physical press (both turning it on
+	// and off), so the same, already-proven pattern as for ENTER/BACKSPACE
+	// can be used - toggle only on the rising edge 0->1, NOT on "release"
+	// (which here is actually just the end of that one-frame pulse).
+	movi u32 #4 0                 // #4 = caps_held_now (accumulator)
+	load u16 #3 200
+	cmpi u32 #3 280                // KEY_CAPS_LOCK
+	jnz capA_1
+	movi u32 #4 1
+capA_1:
+	load u16 #3 202
+	cmpi u32 #3 280
+	jnz capA_2
+	movi u32 #4 1
+capA_2:
+	load u16 #3 204
+	cmpi u32 #3 280
+	jnz capA_3
+	movi u32 #4 1
+capA_3:
+	load u16 #3 206
+	cmpi u32 #3 280
+	jnz capA_4
+	movi u32 #4 1
+capA_4:
+	cmp u32 #4 #6
+	jz capA_done                   // no change in the Caps Lock held state
+	mov #6 #4                      // remember the new state
+	cmpi u32 #4 0
+	jz capA_done                   // it was a RELEASE - don't toggle (toggle
+	                                // only on press, exactly like a normal
+	                                // key)
+	movi u32 #3 1
+	xor u32 #5 #3                  // toggle caps_on
+capA_done:
+
+	// --- Phase B: shift_flag (#2) and primary_key (#3) from all 4 slots ---
+	movi u32 #2 0
+	movi u32 #3 0
+	load u16 #4 200
+	call classify_key
+	load u16 #4 202
+	call classify_key
+	load u16 #4 204
+	call classify_key
+	load u16 #4 206
+	call classify_key
+	// at this point: #2 = shift_flag, #3 = primary_key (0 = nothing typeable is held)
+
+	cmpi u32 #3 0
+	jz rl_release
+
+	cmp u32 #3 #7
+	jz rl_held                     // same key as last frame ->
+	                                // typematic repeat below
+
+	// --- new press (a different code than last frame) -> always fire immediately ------
+	mov #7 #3
+	movi u32 #1 30                 // #1 = repeat_timer, initial delay
+	jmp rl_apply_case
+
+	// --- the same key is held for another frame -> typematic auto-repeat ----
+	// KEY_REPEAT_DELAY = 30 frames (approx. 0.5s at 60 FPS) before the repeat
+	// starts KEY_REPEAT_RATE  = 4 frames (approx. 15 chars/s) between
+	// individual repeats. Both figures assume ~60 FPS (--fps 60, the VM's
+	// default value); with a different --fps the timing changes proportionally.
+rl_held:
+	dec u32 #1
+	cmpi u32 #1 0
+	jg rl_loop                     // still within the countdown
+	movi u32 #1 4                  // next repeat tick in 4 frames
+	// falls through into rl_apply_case - this is exactly the frame in which
+	// the character should be repeated
+
+rl_apply_case:
+	cmpi u32 #3 257                // ENTER
+	jz rl_enter
+	cmpi u32 #3 259                // BACKSPACE
+	jz rl_backspace
+	cmpi u32 #3 32
+	jl rl_loop
+	cmpi u32 #3 90
+	jg rl_loop
+	cmpi u32 #0 62
+	jge rl_loop
+
+	cmpi u32 #3 65
+	jl rl_store_char
+	cmpi u32 #3 90
+	jg rl_store_char
+	// it's a letter (physical code 65-90, i.e. the "uppercase" form) - check shift/caps:
+	mov #4 #2
+	xor u32 #4 #5                  // #4 = shift XOR caps_on (1 = should be UPPERCASE)
+	cmpi u32 #4 1
+	jz rl_store_char                // already in "uppercase" form, no need to change
+	addi u32 #3 32                  // otherwise convert to lowercase
+
+rl_store_char:
+	mov #4 #0
+	addi u32 #4 300
+	storer u8 #4 #3
+	inc u32 #0
+	mov #14 #3
+	call print_char
+	jmp rl_loop
+
+rl_backspace:
+	cmpi u32 #0 0
+	jz rl_loop
+	dec u32 #0
+	cmpi u16 #10 0
+	jz rl_loop
+	dec u16 #10
+	movi u16 #14 32
+	xtchar #10 #11 #14 #12 #13
+	xtcurset #10 #11
+	jmp rl_loop
+
+rl_enter:
+	mov #4 #0
+	addi u32 #4 300
+	movi u8 #2 0
+	storer u8 #4 #2
+	movi u16 #14 10
+	call print_char
+	ret
+
+rl_release:
+	movi u32 #7 0
+	jmp rl_loop

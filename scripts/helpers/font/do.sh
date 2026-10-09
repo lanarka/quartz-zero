@@ -1,0 +1,1 @@
+python3 cp_gen.py ../../assets/PxPlus_IBM_VGA8.ttf codepoints.h codepoints.c

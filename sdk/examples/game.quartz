@@ -1,0 +1,288 @@
+// ============================================================================
+// game.quartz - Pong (640x480).
+// Left paddle: W (up) / S (down).  Right paddle: Up arrow / Down arrow.
+// The score is shown in text mode, top left/right.
+//
+// xikey stores key codes in RAM as 4x u16 (little-endian, 2 bytes per
+// key = 8 bytes total), so we use the real key codes directly
+// (KEY_W=87, KEY_S=83, KEY_UP=265, KEY_DOWN=264).
+// ============================================================================
+
+// --- register map ---------------------------------------------------------
+// #0  ball_x           (i32)
+// #1  ball_y           (i32)
+// #2  ball_dirx        (0 = right, 1 = left)
+// #3  ball_diry        (0 = down,  1 = up)
+// #4  left_paddle_y    (i32)
+// #5  right_paddle_y   (i32)
+// #6  left_score       (u32)
+// #7  right_score      (u32)
+// #8-#9                scratch (temporary)
+// #10 ball_size        (10, constant)
+// #11 paddle_w         (10, constant)
+// #12 paddle_h         (60, constant)
+// #13 sprite_buf_addr  (0x2000, constant - shared white pixel buffer
+//                       for both the ball and both paddles, since everything is white)
+// #14 left_paddle_x    (20, constant)
+// #15 right_paddle_x   (610, constant)
+
+// --- constants into registers ---
+	movi u16 #10 10
+	movi u16 #11 10
+	movi u16 #12 60
+	movi u32 #13 0x2000
+	movi u16 #14 20
+	movi u16 #15 610
+
+// --- fill the shared pixel buffer with white (paddle_w*paddle_h) ---
+// #0 is temporarily used here as the color - the real ball_x is set only afterwards.
+	movi u32 #0 0xFFFFFFFF
+	call fill_sprite
+
+// --- game initialization ---
+	movi i32 #0 315          // ball_x (center: (640-10)/2)
+	movi i32 #1 235          // ball_y (center: (480-10)/2)
+	movi i32 #2 0            // ball_dirx = right
+	movi i32 #3 0            // ball_diry = down
+	movi i32 #4 210          // left_paddle_y (center: (480-60)/2)
+	movi i32 #5 210          // right_paddle_y
+	movi u32 #6 0            // left_score
+	movi u32 #7 0            // right_score
+
+	call update_score_display
+
+// ============================================================================
+main_loop:
+	xclear
+	xframe #0  #1 #10 #10 #13     // ball
+	xframe #14 #4 #11 #12 #13     // left paddle
+	xframe #15 #5 #11 #12 #13     // right paddle
+	xvsync 0
+
+	movi u32 #8 0x3000
+	xikey #9 #8               // fills RAM[0x3000..0x3007] (4x u16) with currently held keys
+
+	// --- W: left paddle up ---
+	load u16 #8 0x3000
+	cmpi u16 #8 87
+	jz key_w_held
+	load u16 #8 0x3002
+	cmpi u16 #8 87
+	jz key_w_held
+	load u16 #8 0x3004
+	cmpi u16 #8 87
+	jz key_w_held
+	load u16 #8 0x3006
+	cmpi u16 #8 87
+	jz key_w_held
+	jmp key_w_done
+key_w_held:
+	subi i32 #4 5
+	cmpi i32 #4 0
+	jg key_w_done
+	movi i32 #4 0
+key_w_done:
+
+	// --- S: left paddle down ---
+	load u16 #8 0x3000
+	cmpi u16 #8 83
+	jz key_s_held
+	load u16 #8 0x3002
+	cmpi u16 #8 83
+	jz key_s_held
+	load u16 #8 0x3004
+	cmpi u16 #8 83
+	jz key_s_held
+	load u16 #8 0x3006
+	cmpi u16 #8 83
+	jz key_s_held
+	jmp key_s_done
+key_s_held:
+	addi i32 #4 5
+	cmpi i32 #4 420           // paddle_y_max = 480 - paddle_h
+	jl key_s_done
+	movi i32 #4 420
+key_s_done:
+
+	// --- Up arrow: right paddle up (KEY_UP = 265) ---
+	load u16 #8 0x3000
+	cmpi u16 #8 265
+	jz key_up_held
+	load u16 #8 0x3002
+	cmpi u16 #8 265
+	jz key_up_held
+	load u16 #8 0x3004
+	cmpi u16 #8 265
+	jz key_up_held
+	load u16 #8 0x3006
+	cmpi u16 #8 265
+	jz key_up_held
+	jmp key_up_done
+key_up_held:
+	subi i32 #5 5
+	cmpi i32 #5 0
+	jg key_up_done
+	movi i32 #5 0
+key_up_done:
+
+	// --- Down arrow: right paddle down (KEY_DOWN = 264) ---
+	load u16 #8 0x3000
+	cmpi u16 #8 264
+	jz key_down_held
+	load u16 #8 0x3002
+	cmpi u16 #8 264
+	jz key_down_held
+	load u16 #8 0x3004
+	cmpi u16 #8 264
+	jz key_down_held
+	load u16 #8 0x3006
+	cmpi u16 #8 264
+	jz key_down_held
+	jmp key_down_done
+key_down_held:
+	addi i32 #5 5
+	cmpi i32 #5 420
+	jl key_down_done
+	movi i32 #5 420
+key_down_done:
+
+	// --- ball X movement ---
+	cmpi i32 #2 0
+	jnz ball_left
+	addi i32 #0 4
+	jmp ball_x_done
+ball_left:
+	subi i32 #0 4
+ball_x_done:
+
+	// --- ball Y movement ---
+	cmpi i32 #3 0
+	jnz ball_up
+	addi i32 #1 4
+	jmp ball_y_done
+ball_up:
+	subi i32 #1 4
+ball_y_done:
+
+	// --- bounce off the top/bottom edge ---
+	cmpi i32 #1 0
+	jg ball_top_ok
+	movi i32 #1 0
+	movi i32 #3 0
+ball_top_ok:
+	cmpi i32 #1 470          // 480 - ball_size
+	jl ball_bottom_ok
+	movi i32 #1 470
+	movi i32 #3 1
+ball_bottom_ok:
+
+	// --- left paddle: collision / miss ---
+	cmpi i32 #2 0            // the ball must be moving left, otherwise we don't care
+	jz left_check_done
+	cmpi i32 #0 30           // left_paddle_x(20) + paddle_w(10)
+	jg left_check_done
+	mov  #8 #1
+	addi i32 #8 10           // #8 = ball_y + ball_size (bottom of the ball)
+	cmp  i32 #8 #4
+	jl   left_miss_check     // bottom of the ball above the top of the paddle -> no overlap
+	mov  #8 #4
+	addi i32 #8 60           // #8 = left_paddle_y + paddle_h (bottom of the paddle)
+	cmp  i32 #1 #8
+	jg   left_miss_check     // top of the ball below the bottom of the paddle -> no overlap
+	movi i32 #2 0            // bounce: now moving right
+	movi i32 #0 30
+	jmp left_check_done
+left_miss_check:
+	cmpi i32 #0 0
+	jg   left_check_done     // the ball isn't completely off screen yet
+	addi u32 #7 1            // the right player scores
+	movi i32 #0 315
+	movi i32 #1 235
+	movi i32 #2 0
+	movi i32 #3 0
+	call update_score_display
+left_check_done:
+
+	// --- right paddle: collision / miss ---
+	cmpi i32 #2 0            // the ball must be moving right
+	jnz right_check_done
+	cmpi i32 #0 600          // right_paddle_x(610) - ball_size(10)
+	jl right_check_done
+	mov  #8 #1
+	addi i32 #8 10
+	cmp  i32 #8 #5
+	jl   right_miss_check
+	mov  #8 #5
+	addi i32 #8 60
+	cmp  i32 #1 #8
+	jg   right_miss_check
+	movi i32 #2 1            // bounce: now moving left
+	movi i32 #0 600
+	jmp right_check_done
+right_miss_check:
+	cmpi i32 #0 640
+	jl   right_check_done
+	addi u32 #6 1            // the left player scores
+	movi i32 #0 315
+	movi i32 #1 235
+	movi i32 #2 0
+	movi i32 #3 0
+	call update_score_display
+right_check_done:
+
+	jmp main_loop
+
+// ============================================================================
+// fill_sprite: fills paddle_w*paddle_h pixels at address sprite_buf_addr
+// (#13) with the color from register #0 (white, when called from the intro).
+// Uses #8 (running address) and #9 (counter) as temporary registers.
+// ============================================================================
+fill_sprite:
+	mov  #8 #13
+	movi u32 #9 600          // paddle_w * paddle_h = 10*60 = 600 pixels
+fill_sprite_loop:
+	storer u32 #8 #0
+	addi   u32 #8 4
+	subi   u32 #9 1
+	cmpi   u32 #9 0
+	jnz fill_sprite_loop
+	ret
+
+// ============================================================================
+// update_score_display: redraws both scores (mod 10) in text mode.
+// Temporarily "borrows" registers #10,#11,#12,#14,#15 (push/pop), so that
+// xtchar has enough registers for its 5 arguments (x,y,cp,fg,bg).
+// ============================================================================
+update_score_display:
+	push #10
+	push #11
+	push #12
+	push #14
+	push #15
+
+	// --- left score ---
+	mov  #8 #6
+	movi u32 #9 10
+	mod  u32 #8 #9
+	addi u32 #8 48            // ASCII '0' + digit
+	movi u16 #10 10           // x
+	movi u16 #11 1            // y
+	movi u32 #12 0xFFFFFFFF   // fg = white
+	movi u32 #14 0xFF000000   // bg = black
+	xtchar #10 #11 #8 #12 #14
+
+	// --- right score ---
+	mov  #8 #7
+	movi u32 #9 10
+	mod  u32 #8 #9
+	addi u32 #8 48
+	movi u16 #10 68
+	movi u16 #11 1
+	xtchar #10 #11 #8 #12 #14
+
+	pop #15
+	pop #14
+	pop #12
+	pop #11
+	pop #10
+	ret

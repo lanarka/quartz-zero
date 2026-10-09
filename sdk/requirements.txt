@@ -1,0 +1,4 @@
+textual==6.0.0
+rich
+lark
+colorama

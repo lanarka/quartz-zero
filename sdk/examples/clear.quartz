@@ -1,0 +1,8 @@
+
+loop:
+	xclear
+	movi u32 #0 0x330000ff
+	xclearc #0	
+
+	xvsync 0
+	jmp loop

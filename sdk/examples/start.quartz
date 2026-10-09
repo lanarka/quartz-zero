@@ -1,0 +1,214 @@
+	%data "sdk/examples/start.data.json"
+	
+	video 1 60 1.0 0
+	xtgetres #0 #1	
+	print u16 #0
+	print u16 #1
+
+	xgetres #0 #1             // screen resolution
+	print u16 #0
+	print u16 #1
+
+	movi u16 #2 10            // arrow width
+	movi u16 #3 16            // arrow height
+	movi u32 #4 0x00002000    // address of the arrow data
+
+	movi u32 #5 0xFF00FF00    // fill the cursor arrow buffer
+	movi u32 #10 0x00000000
+	store u32 0x00002000 #5
+	store u32 0x00002004 #10
+	store u32 0x00002008 #10
+	store u32 0x0000200C #10
+	store u32 0x00002010 #10
+	store u32 0x00002014 #10
+	store u32 0x00002018 #10
+	store u32 0x0000201C #10
+	store u32 0x00002020 #10
+	store u32 0x00002024 #10
+	store u32 0x00002028 #5
+	store u32 0x0000202C #5
+	store u32 0x00002030 #10
+	store u32 0x00002034 #10
+	store u32 0x00002038 #10
+	store u32 0x0000203C #10
+	store u32 0x00002040 #10
+	store u32 0x00002044 #10
+	store u32 0x00002048 #10
+	store u32 0x0000204C #10
+	store u32 0x00002050 #5
+	store u32 0x00002054 #5
+	store u32 0x00002058 #5
+	store u32 0x0000205C #10
+	store u32 0x00002060 #10
+	store u32 0x00002064 #10
+	store u32 0x00002068 #10
+	store u32 0x0000206C #10
+	store u32 0x00002070 #10
+	store u32 0x00002074 #10
+	store u32 0x00002078 #5
+	store u32 0x0000207C #5
+	store u32 0x00002080 #5
+	store u32 0x00002084 #5
+	store u32 0x00002088 #10
+	store u32 0x0000208C #10
+	store u32 0x00002090 #10
+	store u32 0x00002094 #10
+	store u32 0x00002098 #10
+	store u32 0x0000209C #10
+	store u32 0x000020A0 #5
+	store u32 0x000020A4 #5
+	store u32 0x000020A8 #5
+	store u32 0x000020AC #5
+	store u32 0x000020B0 #5
+	store u32 0x000020B4 #10
+	store u32 0x000020B8 #10
+	store u32 0x000020BC #10
+	store u32 0x000020C0 #10
+	store u32 0x000020C4 #10
+	store u32 0x000020C8 #5
+	store u32 0x000020CC #5
+	store u32 0x000020D0 #5
+	store u32 0x000020D4 #5
+	store u32 0x000020D8 #5
+	store u32 0x000020DC #5
+	store u32 0x000020E0 #10
+	store u32 0x000020E4 #10
+	store u32 0x000020E8 #10
+	store u32 0x000020EC #10
+	store u32 0x000020F0 #5
+	store u32 0x000020F4 #5
+	store u32 0x000020F8 #5
+	store u32 0x000020FC #5
+	store u32 0x00002100 #5
+	store u32 0x00002104 #5
+	store u32 0x00002108 #5
+	store u32 0x0000210C #10
+	store u32 0x00002110 #10
+	store u32 0x00002114 #10
+	store u32 0x00002118 #5
+	store u32 0x0000211C #5
+	store u32 0x00002120 #5
+	store u32 0x00002124 #5
+	store u32 0x00002128 #5
+	store u32 0x0000212C #5
+	store u32 0x00002130 #5
+	store u32 0x00002134 #5
+	store u32 0x00002138 #10
+	store u32 0x0000213C #10
+	store u32 0x00002140 #5
+	store u32 0x00002144 #5
+	store u32 0x00002148 #5
+	store u32 0x0000214C #5
+	store u32 0x00002150 #5
+	store u32 0x00002154 #5
+	store u32 0x00002158 #5
+	store u32 0x0000215C #5
+	store u32 0x00002160 #5
+	store u32 0x00002164 #10
+	store u32 0x00002168 #5
+	store u32 0x0000216C #5
+	store u32 0x00002170 #5
+	store u32 0x00002174 #5
+	store u32 0x00002178 #5
+	store u32 0x0000217C #10
+	store u32 0x00002180 #10
+	store u32 0x00002184 #10
+	store u32 0x00002188 #10
+	store u32 0x0000218C #10
+	store u32 0x00002190 #5
+	store u32 0x00002194 #5
+	store u32 0x00002198 #5
+	store u32 0x0000219C #10
+	store u32 0x000021A0 #5
+	store u32 0x000021A4 #5
+	store u32 0x000021A8 #10
+	store u32 0x000021AC #10
+	store u32 0x000021B0 #10
+	store u32 0x000021B4 #10
+	store u32 0x000021B8 #5
+	store u32 0x000021BC #5
+	store u32 0x000021C0 #10
+	store u32 0x000021C4 #10
+	store u32 0x000021C8 #10
+	store u32 0x000021CC #5
+	store u32 0x000021D0 #5
+	store u32 0x000021D4 #10
+	store u32 0x000021D8 #10
+	store u32 0x000021DC #10
+	store u32 0x000021E0 #5
+	store u32 0x000021E4 #10
+	store u32 0x000021E8 #10
+	store u32 0x000021EC #10
+	store u32 0x000021F0 #10
+	store u32 0x000021F4 #10
+	store u32 0x000021F8 #5
+	store u32 0x000021FC #5
+	store u32 0x00002200 #10
+	store u32 0x00002204 #10
+	store u32 0x00002208 #10
+	store u32 0x0000220C #10
+	store u32 0x00002210 #10
+	store u32 0x00002214 #10
+	store u32 0x00002218 #10
+	store u32 0x0000221C #10
+	store u32 0x00002220 #5
+	store u32 0x00002224 #5
+	store u32 0x00002228 #10
+	store u32 0x0000222C #10
+	store u32 0x00002230 #10
+	store u32 0x00002234 #10
+	store u32 0x00002238 #10
+	store u32 0x0000223C #10
+	store u32 0x00002240 #10
+	store u32 0x00002244 #10
+	store u32 0x00002248 #10
+	store u32 0x0000224C #5
+	store u32 0x00002250 #5
+	store u32 0x00002254 #10
+	store u32 0x00002258 #10
+	store u32 0x0000225C #10
+	store u32 0x00002260 #10
+	store u32 0x00002264 #10
+	store u32 0x00002268 #10
+	store u32 0x0000226C #10
+	store u32 0x00002270 #10
+	store u32 0x00002274 #5
+	store u32 0x00002278 #5
+	store u32 0x0000227C #10
+
+	movi u32 #6 0x88333333       // background color (semi-transparent)
+
+	movi u16 #7 2                // used to compute the center (horiz.)
+	mov #11 #1
+	div u16 #11 #7
+	subi u16 #11 127             // 127 = half the logo width
+
+	mov #12 #0
+	div u16 #12 #7
+	subi u16 #12 80              // 80 = half the logo height
+
+	movi u16 #13 254             // logo width
+	movi u16 #14 160             // logo height
+	movi u32 #10 0x00002300      // creates the logo
+
+
+	movi u16 #8 0                // horiz. coordinate
+	movi u16 #9 0                // vert. coordinate
+	movi u16 #7 'X'              // character
+	movi u32 #15 0xFF0000FF      // character color
+
+	beep                         // beep
+
+main_loop:
+	xclearc #6                   // fill the background
+
+
+	xframe #11 #12 #13 #14 #10   // draw the logo
+
+	xtchar #8 #9 #7 #15 #6       // print the character
+
+	ximouse #0 #1 #5             // #0=mouse_x #1=mouse_y #5=mouse_btn (unused)
+	xframe #0 #1 #2 #3 #4        // draw the cursor at the mouse position - now with real alpha
+
+	xvsync 0
+	jmp main_loop

@@ -1,0 +1,36 @@
+// NET TEST
+
+	// send packet
+
+	movi u8 #0 1       // packet version
+	store u8 100 #0
+
+	movi u8 #0 'h'
+	store u8 101 #0
+	movi u8 #0 'e'
+	store u8 102 #0
+	movi u8 #0 'l'
+	store u8 103 #0
+	store u8 104 #0
+	movi u8 #0 'o'
+	store u8 105 #0
+
+	movi u32 #1 100
+	movi u32 #2 6      // packet length
+
+	netsend #1 #2 #3 
+	print u8 #3        // #3: 1 = OK
+	
+
+loop:
+
+	movi u32 #0 200
+	movi u32 #1 6
+
+	netrecv #0 #1 #2 #3
+
+	print u8 #2       // Dst.Len.
+	print u8 #3       // Status
+	
+	xvsync 0
+	jmp loop
