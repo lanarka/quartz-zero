@@ -135,9 +135,9 @@ segment, followed by an optional data segment:
 
 | Offset | Size | Field | Description |
 |---|---|---|---|
-| 0  | 4 | magic        | Fixed bytes `00 51 4D 47` |
+| 0  | 4 | magic        | Fixed bytes `7F 51 00 7F` |
 | 4  | 1 | img_version   | Must equal the VM's `IMG_VERSION` (currently `4`) |
-| 5  | 1 | emu_version   | Must equal the VM's `EMU_VERSION` (currently `255`) |
+| 5  | 1 | runtime_version   | Must equal the VM's `RUNTIME_VERSION` (currently `255`) |
 | 6  | 4 | entry         | Initial program counter (u32, little-endian) |
 | 10 | 4 | code_len      | Length of the code segment in bytes (u32, LE) |
 | 14 | 4 | data_len      | Length of the data segment in bytes (u32, LE); `0` = no data segment |
