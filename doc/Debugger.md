@@ -8,7 +8,7 @@ A textual (TUI) debugger for compiled QuartzVM binaries (`.bin`)
 pip install -r requirements.txt --break-system-packages
 ```
 
-![Debuger](img/debuger.png)
+![Debuger](img/debugger.png)
 
 ## Running
 
